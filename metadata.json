@@ -1,0 +1,6 @@
+{
+  "name": "Abhaya",
+  "description": "Abhaya - Protect, Prevent, Empower. A premium personal safety and empowerment application with automatic guardianship, journey tracking, safe places search, and an emergency SOS system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
