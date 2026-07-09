@@ -28,7 +28,9 @@ SafeSphere is a Flutter-based emergency application designed to help women quick
 🚧 Currently under active development during the 36-hour hackathon.
 
 ## Team
+Neutral Nexus
 
--
+1. Anuj Kumar Sharma
+2. Bhoomi
 
 ## License
