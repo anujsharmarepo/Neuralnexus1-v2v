@@ -41,6 +41,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -67,6 +69,7 @@ fun AbhayaApp(
     val navController = rememberNavController()
     val context = LocalContext.current
     val alertMessage by viewModel.alertMessage.collectAsStateWithLifecycle()
+    val sosTriggered by viewModel.sosTriggered.collectAsStateWithLifecycle()
 
     // Listen for alerts and show high-fidelity snackbar/toast
     LaunchedEffect(alertMessage) {
@@ -76,28 +79,32 @@ fun AbhayaApp(
         }
     }
 
-    NavHost(
-        navController = navController,
-        startDestination = "splash",
-        modifier = modifier.fillMaxSize()
-    ) {
-        composable("splash") {
-            SplashScreen(navController = navController, viewModel = viewModel)
-        }
-        composable("onboarding") {
-            OnboardingScreen(navController = navController)
-        }
-        composable("login") {
-            LoginScreen(navController = navController, viewModel = viewModel)
-        }
-        composable("signup") {
-            SignupScreen(navController = navController, viewModel = viewModel)
-        }
-        composable("forgot_password") {
-            ForgotPasswordScreen(navController = navController, viewModel = viewModel)
-        }
-        composable("main_content") {
-            MainContentScreen(navController = navController, viewModel = viewModel)
+    if (sosTriggered) {
+        EmergencyModeScreen(viewModel = viewModel, modifier = modifier.fillMaxSize())
+    } else {
+        NavHost(
+            navController = navController,
+            startDestination = "splash",
+            modifier = modifier.fillMaxSize()
+        ) {
+            composable("splash") {
+                SplashScreen(navController = navController, viewModel = viewModel)
+            }
+            composable("onboarding") {
+                OnboardingScreen(navController = navController)
+            }
+            composable("login") {
+                LoginScreen(navController = navController, viewModel = viewModel)
+            }
+            composable("signup") {
+                SignupScreen(navController = navController, viewModel = viewModel)
+            }
+            composable("forgot_password") {
+                ForgotPasswordScreen(navController = navController, viewModel = viewModel)
+            }
+            composable("main_content") {
+                MainContentScreen(navController = navController, viewModel = viewModel)
+            }
         }
     }
 }
@@ -2449,10 +2456,14 @@ fun PoliceScreenContent(viewModel: AbhayaViewModel) {
 // ==========================================
 @Composable
 fun SettingsScreenContent(navController: NavController, viewModel: AbhayaViewModel) {
+    val correctPin by viewModel.sosPin.collectAsStateWithLifecycle()
+    val emergencyHistory by viewModel.emergencyHistory.collectAsStateWithLifecycle()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -2470,7 +2481,7 @@ fun SettingsScreenContent(navController: NavController, viewModel: AbhayaViewMod
             modifier = Modifier.align(Alignment.Start)
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(24.dp))
 
         // Shield Configuration Card
         Card(
@@ -2488,7 +2499,96 @@ fun SettingsScreenContent(navController: NavController, viewModel: AbhayaViewMod
             }
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // 1. PIN Settings Card
+        var pinInput by remember { mutableStateOf(correctPin) }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.1f))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("SECURITY DEACTIVATION PIN", fontWeight = FontWeight.Bold, color = Color(0xFFFF004D), fontSize = 12.sp)
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = pinInput,
+                        onValueChange = {
+                            if (it.length <= 4 && it.all { char -> char.isDigit() }) {
+                                pinInput = it
+                                if (it.length == 4) {
+                                    viewModel.updateSosPin(it)
+                                }
+                            }
+                        },
+                        label = { Text("4-Digit SOS PIN") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFFFF004D),
+                            focusedLabelColor = Color(0xFFFF004D)
+                        )
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "PIN: $correctPin",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.Gray
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // 2. Emergency History Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.1f))
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("EMERGENCY HISTORY LOGS", fontWeight = FontWeight.Bold, color = Color(0xFFFF004D), fontSize = 12.sp)
+                Spacer(modifier = Modifier.height(12.dp))
+                if (emergencyHistory.isEmpty()) {
+                    Text(
+                        text = "No historic emergency alerts triggered.",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        emergencyHistory.take(4).forEach { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = item.dateString, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text(text = "Coordinates: ${item.latitude}, ${item.longitude}", fontSize = 11.sp, color = Color.Gray)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .background(Color(0xFFFFEBEE), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(text = item.status, fontSize = 9.sp, fontWeight = FontWeight.Black, color = Color(0xFFD50000))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         // Legal information
         Card(
@@ -2506,7 +2606,7 @@ fun SettingsScreenContent(navController: NavController, viewModel: AbhayaViewMod
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(32.dp))
 
         // Logout button
         Button(
