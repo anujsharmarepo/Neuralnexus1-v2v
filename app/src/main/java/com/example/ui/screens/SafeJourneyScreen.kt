@@ -837,8 +837,42 @@ fun SafeJourneyScreen(
                                     // Share Journey Trigger
                                     Button(
                                         onClick = {
-                                            val shareUrl = "https://abhaya-safety.net/track?journey=${System.currentTimeMillis()}"
-                                            Toast.makeText(context, "Tracking Link copied to clipboard:\n$shareUrl", Toast.LENGTH_LONG).show()
+                                            val shareUrl = if (currentGpsLatLng != null) {
+                                                if (destLatLng != null) {
+                                                    "https://www.google.com/maps/dir/?api=1&origin=${currentGpsLatLng!!.latitude},${currentGpsLatLng!!.longitude}&destination=${destLatLng!!.latitude},${destLatLng!!.longitude}&travelmode=driving"
+                                                } else {
+                                                    "https://www.google.com/maps/search/?api=1&query=${currentGpsLatLng!!.latitude},${currentGpsLatLng!!.longitude}"
+                                                }
+                                            } else {
+                                                if (destLatLng != null) {
+                                                    "https://www.google.com/maps/search/?api=1&query=${destLatLng!!.latitude},${destLatLng!!.longitude}"
+                                                } else {
+                                                    "https://www.google.com/maps"
+                                                }
+                                            }
+                                            try {
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                                val clip = android.content.ClipData.newPlainText("Journey Tracking Link", shareUrl)
+                                                clipboard.setPrimaryClip(clip)
+                                                Toast.makeText(context, "Tracking Link copied to clipboard!", Toast.LENGTH_SHORT).show()
+                                             } catch (e: Exception) {
+                                                 e.printStackTrace()
+                                             }
+                                             try {
+                                                 val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                     type = "text/plain"
+                                                     val destName = destination ?: "my destination"
+                                                    val shareMsg = if (currentGpsLatLng != null && destLatLng != null) {
+                                                        "I am on a safe journey to $destName. Track my route and live location here: $shareUrl"
+                                                    } else {
+                                                        "I am on a safe journey. Track my live location here: $shareUrl"
+                                                    }
+                                                    putExtra(android.content.Intent.EXTRA_TEXT, shareMsg)
+                                                 }
+                                                 context.startActivity(android.content.Intent.createChooser(shareIntent, "Share Tracking Link"))
+                                             } catch (e: Exception) {
+                                                 Toast.makeText(context, "Error sharing link", Toast.LENGTH_SHORT).show()
+                                             }
                                         },
                                         modifier = Modifier
                                             .weight(1f)
@@ -1252,7 +1286,25 @@ fun SafeJourneyScreen(
                                 // 1. Share Arrival details
                                 Button(
                                     onClick = {
-                                        Toast.makeText(context, "Arrival message sent to active guardians!", Toast.LENGTH_SHORT).show()
+                                        val dest = destination ?: "my destination"
+                                        val arrivalMsg = "I have arrived safely at $dest! Thank you for watching over me. (Abhaya Safe Shield)"
+                                        try {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                            val clip = android.content.ClipData.newPlainText("Arrival Notification", arrivalMsg)
+                                            clipboard.setPrimaryClip(clip)
+                                            Toast.makeText(context, "Arrival details copied to clipboard!", Toast.LENGTH_SHORT).show()
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                        }
+                                        try {
+                                            val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(android.content.Intent.EXTRA_TEXT, arrivalMsg)
+                                            }
+                                            context.startActivity(android.content.Intent.createChooser(shareIntent, "Share Arrival Notification"))
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Error sharing arrival details", Toast.LENGTH_SHORT).show()
+                                        }
                                     },
                                     modifier = Modifier
                                         .weight(1f)

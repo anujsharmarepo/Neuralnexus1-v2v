@@ -247,6 +247,50 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         val pinPrefs = context.getSharedPreferences("abhaya_security_prefs", Context.MODE_PRIVATE)
         _sosPin.value = pinPrefs.getString("sos_pin", "1234") ?: "1234"
         startLocationUpdates()
+
+        // Restore active safe journey state
+        val activePrefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+        val isActive = activePrefs.getBoolean("is_active", false)
+        if (isActive) {
+            val dest = activePrefs.getString("destination", null)
+            if (dest != null) {
+                _isSafeJourneyActive.value = true
+                _journeyDestination.value = dest
+                _journeyDistance.value = activePrefs.getFloat("distance", 0f).toDouble()
+                _journeyEta.value = activePrefs.getInt("eta", 0)
+                _checkInInterval.value = activePrefs.getInt("check_in_interval", 5)
+                _showSafeJourneyScreen.value = activePrefs.getBoolean("show_screen", false)
+                _journeyStatus.value = activePrefs.getString("status", "In Progress") ?: "In Progress"
+
+                val startTimeMs = activePrefs.getLong("start_time_ms", System.currentTimeMillis())
+                val now = System.currentTimeMillis()
+                val elapsedSeconds = ((now - startTimeMs) / 1000).toInt().coerceAtLeast(0)
+                _journeyTimerSeconds.value = elapsedSeconds
+
+                val nextCheckInTargetTimeMs = activePrefs.getLong("next_check_in_target_time_ms", now + (_checkInInterval.value * 60 * 1000L))
+                val nextCheckIn = ((nextCheckInTargetTimeMs - now) / 1000).toInt()
+                _nextCheckInSeconds.value = nextCheckIn.coerceAtLeast(0)
+
+                // Start the background tracking service if not already running
+                try {
+                    val serviceIntent = Intent(context, com.example.service.SafeJourneyService::class.java).apply {
+                        action = com.example.service.SafeJourneyService.ACTION_START_JOURNEY
+                        putExtra(com.example.service.SafeJourneyService.EXTRA_DESTINATION, dest)
+                        putExtra(com.example.service.SafeJourneyService.EXTRA_ETA, _journeyEta.value)
+                        putExtra(com.example.service.SafeJourneyService.EXTRA_NEXT_CHECK_IN, _nextCheckInSeconds.value)
+                    }
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        context.startForegroundService(serviceIntent)
+                    } else {
+                        context.startService(serviceIntent)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+
+                startJourneyLoop()
+            }
+        }
     }
 
     private var locationJob: Job? = null
@@ -342,10 +386,61 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
 
     fun openSafeJourney() {
         _showSafeJourneyScreen.value = true
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("show_screen", true).apply()
     }
 
     fun closeSafeJourney() {
         _showSafeJourneyScreen.value = false
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("show_screen", false).apply()
+    }
+
+    private fun saveActiveJourneyState() {
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            putBoolean("is_active", _isSafeJourneyActive.value)
+            putString("destination", _journeyDestination.value)
+            putFloat("distance", _journeyDistance.value.toFloat())
+            putInt("eta", _journeyEta.value)
+            putInt("timer_seconds", _journeyTimerSeconds.value)
+            putString("status", _journeyStatus.value)
+            putInt("next_check_in_seconds", _nextCheckInSeconds.value)
+            putInt("check_in_interval", _checkInInterval.value)
+            putBoolean("show_screen", _showSafeJourneyScreen.value)
+            putLong("last_saved_time_ms", System.currentTimeMillis())
+            apply()
+        }
+    }
+
+    private fun startActiveJourneyPrefs(dest: String, distance: Double, eta: Int, checkInInterval: Int) {
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+        val startTimeMs = System.currentTimeMillis()
+        val nextCheckInTargetTimeMs = startTimeMs + (checkInInterval * 60 * 1000L)
+        prefs.edit().apply {
+            putBoolean("is_active", true)
+            putString("destination", dest)
+            putFloat("distance", distance.toFloat())
+            putInt("eta", eta)
+            putLong("start_time_ms", startTimeMs)
+            putLong("next_check_in_target_time_ms", nextCheckInTargetTimeMs)
+            putString("status", "In Progress")
+            putInt("next_check_in_seconds", checkInInterval * 60)
+            putInt("check_in_interval", checkInInterval)
+            putBoolean("show_screen", _showSafeJourneyScreen.value)
+            putLong("last_saved_time_ms", startTimeMs)
+            apply()
+        }
+    }
+
+    private fun clearActiveJourneyPrefs() {
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+        prefs.edit().clear().apply()
     }
 
     fun setCheckInInterval(minutes: Int) {
@@ -450,6 +545,30 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         val names = if (activeGuardians.isNotEmpty()) activeGuardians.joinToString { it.name } else "your guardians"
         _alertMessage.value = "Journey started! Live location shared with $names. Real-time telemetry is sync'd with Firebase."
 
+        startActiveJourneyPrefs(dest, _journeyDistance.value, _journeyEta.value, _checkInInterval.value)
+
+        val context = getApplication<android.app.Application>()
+        try {
+            val serviceIntent = Intent(context, com.example.service.SafeJourneyService::class.java).apply {
+                action = com.example.service.SafeJourneyService.ACTION_START_JOURNEY
+                putExtra(com.example.service.SafeJourneyService.EXTRA_DESTINATION, dest)
+                putExtra(com.example.service.SafeJourneyService.EXTRA_ETA, _journeyEta.value)
+                putExtra(com.example.service.SafeJourneyService.EXTRA_NEXT_CHECK_IN, _nextCheckInSeconds.value)
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        startJourneyLoop()
+    }
+
+    private fun startJourneyLoop() {
+        journeyJob?.cancel()
         val context = getApplication<android.app.Application>()
         journeyJob = viewModelScope.launch {
             _journeyStatus.value = "In Progress"
@@ -482,6 +601,22 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
                         triggerCheckInAlert()
                     }
                 }
+
+                // Update SharedPreferences with latest timers and state
+                saveActiveJourneyState()
+
+                // Update the background tracking service notification
+                try {
+                    val serviceIntent = Intent(context, com.example.service.SafeJourneyService::class.java).apply {
+                        action = com.example.service.SafeJourneyService.ACTION_UPDATE_STATUS
+                        putExtra(com.example.service.SafeJourneyService.EXTRA_DESTINATION, _journeyDestination.value)
+                        putExtra(com.example.service.SafeJourneyService.EXTRA_ETA, _journeyEta.value)
+                        putExtra(com.example.service.SafeJourneyService.EXTRA_NEXT_CHECK_IN, _nextCheckInSeconds.value)
+                    }
+                    context.startService(serviceIntent)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
     }
@@ -513,6 +648,17 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         if (safe) {
             _nextCheckInSeconds.value = _checkInInterval.value * 60
             _alertMessage.value = "Safety check-in acknowledged. Keeping shield active."
+            
+            // Update preferences with new target time
+            try {
+                val context = getApplication<android.app.Application>()
+                val activePrefs = context.getSharedPreferences("abhaya_active_journey_prefs", Context.MODE_PRIVATE)
+                val checkInInterval = activePrefs.getInt("check_in_interval", 5)
+                val nextCheckInTargetTimeMs = System.currentTimeMillis() + (checkInInterval * 60 * 1000L)
+                activePrefs.edit().putLong("next_check_in_target_time_ms", nextCheckInTargetTimeMs).apply()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         } else {
             // "Need Help" clicked -> immediately engage existing Smart SOS workflow
             _alertMessage.value = "⚠️ Distress check-in initiated. Engaging automatic emergency protocols."
@@ -529,6 +675,17 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         val wasActive = _isSafeJourneyActive.value
         _isSafeJourneyActive.value = false
         _showCheckInDialog.value = false
+
+        val context = getApplication<android.app.Application>()
+        try {
+            val serviceIntent = Intent(context, com.example.service.SafeJourneyService::class.java).apply {
+                action = com.example.service.SafeJourneyService.ACTION_STOP_JOURNEY
+            }
+            context.startService(serviceIntent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        clearActiveJourneyPrefs()
 
         if (wasActive) {
             val dest = _journeyDestination.value ?: "Unknown Destination"
