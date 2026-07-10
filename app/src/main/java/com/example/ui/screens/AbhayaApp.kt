@@ -1091,7 +1091,7 @@ fun MainContentScreen(
             ) { targetTab ->
                 when (targetTab) {
                     "Home" -> HomeScreenContent(userName = userName, viewModel = viewModel)
-                    "Guardian" -> JourneyScreenContent(viewModel = viewModel)
+                    "Guardian" -> SafeJourneyScreen()
                     "Police" -> PoliceScreenContent(viewModel = viewModel)
                     "Settings" -> SettingsScreenContent(navController = navController, viewModel = viewModel)
                 }
