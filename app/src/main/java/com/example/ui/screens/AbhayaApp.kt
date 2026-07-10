@@ -70,6 +70,7 @@ fun AbhayaApp(
     val context = LocalContext.current
     val alertMessage by viewModel.alertMessage.collectAsStateWithLifecycle()
     val sosTriggered by viewModel.sosTriggered.collectAsStateWithLifecycle()
+    val showSafeJourneyScreen by viewModel.showSafeJourneyScreen.collectAsStateWithLifecycle()
 
     // Listen for alerts and show high-fidelity snackbar/toast
     LaunchedEffect(alertMessage) {
@@ -81,6 +82,8 @@ fun AbhayaApp(
 
     if (sosTriggered) {
         EmergencyModeScreen(viewModel = viewModel, modifier = modifier.fillMaxSize())
+    } else if (showSafeJourneyScreen) {
+        SafeJourneyScreen(viewModel = viewModel, modifier = modifier.fillMaxSize())
     } else {
         NavHost(
             navController = navController,
@@ -1091,7 +1094,7 @@ fun MainContentScreen(
             ) { targetTab ->
                 when (targetTab) {
                     "Home" -> HomeScreenContent(userName = userName, viewModel = viewModel)
-                    "Guardian" -> SafeJourneyScreen()
+                    "Guardian" -> JourneyScreenContent(viewModel = viewModel)
                     "Police" -> PoliceScreenContent(viewModel = viewModel)
                     "Settings" -> SettingsScreenContent(navController = navController, viewModel = viewModel)
                 }

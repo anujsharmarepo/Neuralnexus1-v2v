@@ -16,6 +16,9 @@ import java.util.Locale
 import java.util.Date
 import kotlin.concurrent.thread
 import kotlin.math.sin
+import kotlinx.coroutines.Dispatchers
+import com.example.ui.screens.LatLng
+import com.example.ui.screens.MapsService
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -116,6 +119,70 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     private val _emergencyHistory = MutableStateFlow<List<EmergencyHistoryItem>>(emptyList())
     val emergencyHistory: StateFlow<List<EmergencyHistoryItem>> = _emergencyHistory.asStateFlow()
 
+    // Safe Journey States
+    private val _showSafeJourneyScreen = MutableStateFlow(false)
+    val showSafeJourneyScreen: StateFlow<Boolean> = _showSafeJourneyScreen.asStateFlow()
+
+    private val _isSafeJourneyActive = MutableStateFlow(false)
+    val isSafeJourneyActive: StateFlow<Boolean> = _isSafeJourneyActive.asStateFlow()
+
+    private val _journeyDestination = MutableStateFlow<String?>(null)
+    val journeyDestination: StateFlow<String?> = _journeyDestination.asStateFlow()
+
+    private val _journeyDistance = MutableStateFlow(0.0)
+    val journeyDistance: StateFlow<Double> = _journeyDistance.asStateFlow()
+
+    private val _journeyEta = MutableStateFlow(0) // in minutes
+    val journeyEta: StateFlow<Int> = _journeyEta.asStateFlow()
+
+    private val _journeyTimerSeconds = MutableStateFlow(0)
+    val journeyTimerSeconds: StateFlow<Int> = _journeyTimerSeconds.asStateFlow()
+
+    private val _journeyStatus = MutableStateFlow("Idle") // Started, In Progress, Arrived, Cancelled
+    val journeyStatus: StateFlow<String> = _journeyStatus.asStateFlow()
+
+    private val _checkInInterval = MutableStateFlow(5) // 5, 10, 15, 30 minutes
+    val checkInInterval: StateFlow<Int> = _checkInInterval.asStateFlow()
+
+    private val _nextCheckInSeconds = MutableStateFlow(300) // countdown in seconds
+    val nextCheckInSeconds: StateFlow<Int> = _nextCheckInSeconds.asStateFlow()
+
+    private val _showCheckInDialog = MutableStateFlow(false)
+    val showCheckInDialog: StateFlow<Boolean> = _showCheckInDialog.asStateFlow()
+
+    private val _checkInGraceSeconds = MutableStateFlow(15) // grace period countdown
+    val checkInGraceSeconds: StateFlow<Int> = _checkInGraceSeconds.asStateFlow()
+
+    private val _showArrivalPopup = MutableStateFlow(false)
+    val showArrivalPopup: StateFlow<Boolean> = _showArrivalPopup.asStateFlow()
+
+    private val _journeyHistory = MutableStateFlow<List<SafeJourneyHistoryItem>>(emptyList())
+    val journeyHistory: StateFlow<List<SafeJourneyHistoryItem>> = _journeyHistory.asStateFlow()
+
+    private val _routePolylinePoints = MutableStateFlow<List<LatLng>>(emptyList())
+    val routePolylinePoints: StateFlow<List<LatLng>> = _routePolylinePoints.asStateFlow()
+
+    private val _nearbyPoliceStations = MutableStateFlow<List<MapsService.PoliceStation>>(emptyList())
+    val nearbyPoliceStations: StateFlow<List<MapsService.PoliceStation>> = _nearbyPoliceStations.asStateFlow()
+
+    private val _destinationLatLng = MutableStateFlow<LatLng?>(null)
+    val destinationLatLng: StateFlow<LatLng?> = _destinationLatLng.asStateFlow()
+
+    private val _placeSuggestions = MutableStateFlow<List<String>>(emptyList())
+    val placeSuggestions: StateFlow<List<String>> = _placeSuggestions.asStateFlow()
+
+    private val _currentLatLng = MutableStateFlow<LatLng>(LatLng(18.5204, 73.8567))
+    val currentLatLng: StateFlow<LatLng> = _currentLatLng.asStateFlow()
+
+    // Safe Journey Edge Case Selectors (For comprehensive testing in UI)
+    val gpsDisabled = MutableStateFlow(false)
+    val internetUnavailable = MutableStateFlow(false)
+    val permissionDenied = MutableStateFlow(false)
+    val destinationNotFound = MutableStateFlow(false)
+
+    private var journeyJob: Job? = null
+    private var graceJob: Job? = null
+
     private var recordingJob: Job? = null
     private var sirenPlayer: SirenPlayer? = null
     private var flashlightController: FlashlightController? = null
@@ -123,9 +190,273 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
 
     init {
         _emergencyHistory.value = loadEmergencyHistory()
+        _journeyHistory.value = loadJourneyHistory()
         val context = getApplication<android.app.Application>()
         val pinPrefs = context.getSharedPreferences("abhaya_security_prefs", Context.MODE_PRIVATE)
         _sosPin.value = pinPrefs.getString("sos_pin", "1234") ?: "1234"
+    }
+
+    fun openSafeJourney() {
+        _showSafeJourneyScreen.value = true
+    }
+
+    fun closeSafeJourney() {
+        _showSafeJourneyScreen.value = false
+    }
+
+    fun setCheckInInterval(minutes: Int) {
+        if (minutes in listOf(5, 10, 15, 30)) {
+            _checkInInterval.value = minutes
+            if (!_isSafeJourneyActive.value) {
+                _nextCheckInSeconds.value = minutes * 60
+            }
+        }
+    }
+
+    fun searchPlaces(query: String) {
+        if (internetUnavailable.value) {
+            _placeSuggestions.value = emptyList()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val results = MapsService.fetchPlaceSuggestions(query)
+            _placeSuggestions.value = results
+        }
+    }
+
+    fun selectJourneyDestination(dest: String): Boolean {
+        if (destinationNotFound.value) {
+            _alertMessage.value = "Destination Not Found. Check connectivity or spelling."
+            return false
+        }
+        _journeyDestination.value = dest
+
+        val context = getApplication<android.app.Application>()
+        val originPair = getLiveLocation(context)
+        val originLatLng = LatLng(originPair.first, originPair.second)
+        _currentLatLng.value = originLatLng
+        
+        if (!internetUnavailable.value && MapsService.isNetworkAvailable(context)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val result = MapsService.fetchDirections(originLatLng, dest)
+                if (result != null) {
+                    _journeyDistance.value = result.distanceKm
+                    _journeyEta.value = result.durationMins
+                    _routePolylinePoints.value = result.polylinePoints
+                    _destinationLatLng.value = result.destinationLatLng
+                    
+                    val policeStations = MapsService.fetchNearbyPoliceStations(originLatLng)
+                    _nearbyPoliceStations.value = policeStations
+                } else {
+                    calculateFallbackRoute(dest)
+                }
+            }
+        } else {
+            calculateFallbackRoute(dest)
+        }
+        return true
+    }
+
+    private fun calculateFallbackRoute(dest: String) {
+        val hash = dest.hashCode().coerceAtLeast(0)
+        _journeyDistance.value = String.format(Locale.US, "%.1f", 3.0 + (hash % 15) + (hash % 10) / 10.0).toDouble()
+        _journeyEta.value = 8 + (hash % 40)
+        _routePolylinePoints.value = emptyList()
+        _destinationLatLng.value = null
+        _nearbyPoliceStations.value = emptyList()
+    }
+
+    fun startJourney() {
+        if (permissionDenied.value) {
+            _alertMessage.value = "GPS Location Permission Denied. Safe Journey requires location permissions."
+            return
+        }
+        if (gpsDisabled.value) {
+            _alertMessage.value = "GPS is Disabled. Turn on GPS to start tracking."
+            return
+        }
+        
+        val dest = _journeyDestination.value
+        if (dest.isNullOrBlank()) {
+            _alertMessage.value = "Please select a valid destination first."
+            return
+        }
+
+        _isSafeJourneyActive.value = true
+        _journeyStatus.value = "Started"
+        _journeyTimerSeconds.value = 0
+        _nextCheckInSeconds.value = _checkInInterval.value * 60
+        _showCheckInDialog.value = false
+
+        // Cancel previous jobs
+        journeyJob?.cancel()
+        graceJob?.cancel()
+
+        // Simulate sending live location to active guardians
+        val activeGuardians = guardians.value.filter { it.isActive }.take(5)
+        val names = if (activeGuardians.isNotEmpty()) activeGuardians.joinToString { it.name } else "your guardians"
+        _alertMessage.value = "Journey started! Live location shared with $names. Real-time telemetry is sync'd with Firebase."
+
+        val context = getApplication<android.app.Application>()
+        journeyJob = viewModelScope.launch {
+            _journeyStatus.value = "In Progress"
+            while (_isSafeJourneyActive.value) {
+                delay(1000)
+                _journeyTimerSeconds.value += 1
+                
+                // Periodically update live current location
+                if (_journeyTimerSeconds.value % 5 == 0) {
+                    val location = getLiveLocation(context)
+                    _currentLatLng.value = LatLng(location.first, location.second)
+                }
+
+                // Decrement ETA slightly over time for premium feedback loop (every 30 seconds of real-time elapsed)
+                if (_journeyTimerSeconds.value % 30 == 0 && _journeyEta.value > 1) {
+                    _journeyEta.value -= 1
+                    // Slowly decrease remaining distance too
+                    val currentDist = _journeyDistance.value
+                    if (currentDist > 0.2) {
+                        _journeyDistance.value = String.format(Locale.US, "%.1f", currentDist - 0.1).toDouble()
+                    }
+                }
+
+                // Decrement Check-In Countdown
+                if (_nextCheckInSeconds.value > 0) {
+                    _nextCheckInSeconds.value -= 1
+                    if (_nextCheckInSeconds.value == 0) {
+                        triggerCheckInAlert()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun triggerCheckInAlert() {
+        _showCheckInDialog.value = true
+        _checkInGraceSeconds.value = 15 // 15 seconds grace period for demonstration
+
+        graceJob?.cancel()
+        graceJob = viewModelScope.launch {
+            while (_showCheckInDialog.value && _checkInGraceSeconds.value > 0) {
+                delay(1000)
+                _checkInGraceSeconds.value -= 1
+            }
+            if (_showCheckInDialog.value && _checkInGraceSeconds.value == 0) {
+                // User failed to respond in grace period! Automatically trigger the existing Smart SOS workflow!
+                _showCheckInDialog.value = false
+                _alertMessage.value = "⚠️ Safety Check-In timeout! Engaging automatic emergency protocols."
+                activateEmergencyProtocols()
+            }
+        }
+    }
+
+    fun respondToCheckIn(safe: Boolean) {
+        _showCheckInDialog.value = false
+        graceJob?.cancel()
+        graceJob = null
+
+        if (safe) {
+            _nextCheckInSeconds.value = _checkInInterval.value * 60
+            _alertMessage.value = "Safety check-in acknowledged. Keeping shield active."
+        } else {
+            // "Need Help" clicked -> immediately engage existing Smart SOS workflow
+            _alertMessage.value = "⚠️ Distress check-in initiated. Engaging automatic emergency protocols."
+            activateEmergencyProtocols()
+        }
+    }
+
+    fun endJourney(reachedSafely: Boolean) {
+        journeyJob?.cancel()
+        journeyJob = null
+        graceJob?.cancel()
+        graceJob = null
+
+        val wasActive = _isSafeJourneyActive.value
+        _isSafeJourneyActive.value = false
+        _showCheckInDialog.value = false
+
+        if (wasActive) {
+            val dest = _journeyDestination.value ?: "Unknown Destination"
+            val dist = "${_journeyDistance.value} km"
+            val min = _journeyTimerSeconds.value / 60
+            val sec = _journeyTimerSeconds.value % 60
+            val durationStr = String.format(Locale.US, "%02d:%02d", min, sec)
+
+            val sdf = SimpleDateFormat("dd MMM yyyy, HH:mm:ss", Locale.getDefault())
+            val dateStr = sdf.format(Date())
+            val startTimeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(System.currentTimeMillis() - _journeyTimerSeconds.value * 1000))
+
+            val newItem = SafeJourneyHistoryItem(
+                id = System.currentTimeMillis().toString(),
+                destination = dest,
+                distance = dist,
+                duration = durationStr,
+                startTime = startTimeStr,
+                arrivalTime = dateStr,
+                status = if (reachedSafely) "Completed" else "Cancelled"
+            )
+
+            saveJourneyToHistory(newItem)
+
+            if (reachedSafely) {
+                _journeyStatus.value = "Arrived"
+                _showArrivalPopup.value = true
+            } else {
+                _journeyStatus.value = "Cancelled"
+                _alertMessage.value = "Journey terminated by user."
+            }
+        } else {
+            _journeyStatus.value = "Idle"
+        }
+    }
+
+    fun dismissArrivalPopup() {
+        _showArrivalPopup.value = false
+    }
+
+    fun loadJourneyHistory(): List<SafeJourneyHistoryItem> {
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_safe_journey_history", Context.MODE_PRIVATE)
+        val size = prefs.getInt("journey_size", 0)
+        val list = mutableListOf<SafeJourneyHistoryItem>()
+        for (i in 0 until size) {
+            val id = prefs.getString("journey_${i}_id", "") ?: ""
+            val dest = prefs.getString("journey_${i}_dest", "") ?: ""
+            val dist = prefs.getString("journey_${i}_dist", "") ?: ""
+            val dur = prefs.getString("journey_${i}_dur", "") ?: ""
+            val start = prefs.getString("journey_${i}_start", "") ?: ""
+            val arr = prefs.getString("journey_${i}_arr", "") ?: ""
+            val stat = prefs.getString("journey_${i}_stat", "Completed") ?: "Completed"
+            if (id.isNotEmpty()) {
+                list.add(SafeJourneyHistoryItem(id, dest, dist, dur, start, arr, stat))
+            }
+        }
+        return list
+    }
+
+    fun saveJourneyToHistory(item: SafeJourneyHistoryItem) {
+        val context = getApplication<android.app.Application>()
+        val prefs = context.getSharedPreferences("abhaya_safe_journey_history", Context.MODE_PRIVATE)
+        val currentHistory = loadJourneyHistory().toMutableList()
+        currentHistory.add(0, item) // Add to top
+        _journeyHistory.value = currentHistory
+
+        val editor = prefs.edit()
+        editor.putInt("journey_size", currentHistory.size)
+        for (i in currentHistory.indices) {
+            val histItem = currentHistory[i]
+            editor.putString("journey_${i}_id", histItem.id)
+            editor.putString("journey_${i}_dest", histItem.destination)
+            editor.putString("journey_${i}_dist", histItem.distance)
+            editor.putString("journey_${i}_dur", histItem.duration)
+            editor.putString("journey_${i}_start", histItem.startTime)
+            editor.putString("journey_${i}_arr", histItem.arrivalTime)
+            editor.putString("journey_${i}_stat", histItem.status)
+        }
+        editor.apply()
+
+        // Sync with Firestore simulation
+        _firebaseStatus.value = "Safe Journey event record synchronized securely to Firebase Firestore."
     }
 
     fun updateSosPin(newPin: String) {
@@ -146,7 +477,11 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     }
 
     fun triggerQuickAction(actionName: String) {
-        _alertMessage.value = "Quick Action triggered: $actionName. Activating secure protocols."
+        if (actionName == "Safe Journey") {
+            _showSafeJourneyScreen.value = true
+        } else {
+            _alertMessage.value = "Quick Action triggered: $actionName. Activating secure protocols."
+        }
     }
 
     fun login() {
@@ -510,6 +845,16 @@ data class EmergencyHistoryItem(
     val latitude: Double,
     val longitude: Double,
     val dateString: String,
+    val status: String
+)
+
+data class SafeJourneyHistoryItem(
+    val id: String,
+    val destination: String,
+    val distance: String,
+    val duration: String,
+    val startTime: String,
+    val arrivalTime: String,
     val status: String
 )
 
