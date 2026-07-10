@@ -222,7 +222,7 @@ fun SafeJourneyScreen(
                         Icon(
                             imageVector = Icons.Default.Build,
                             contentDescription = "Simulator settings",
-                            tint = if (isGpsDisabled || isInternetOffline || isPermissionDenied || isDestNotFound) Color(0xFFFF004D) else Color.Gray
+                            tint = if (isGpsDisabled || isInternetOffline || isPermissionDenied || isDestNotFound) Color(0xFFFF004D) else Color(0xFF301114).copy(alpha = 0.6f)
                         )
                     }
                 },
@@ -248,12 +248,15 @@ fun SafeJourneyScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(240.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
                     shape = RoundedCornerShape(24.dp),
                     border = BorderStroke(1.5.dp, Color(0xFFFF004D).copy(alpha = 0.15f))
                 ) {
                     Box(modifier = Modifier.fillMaxSize()) {
                         // Real Embedded OpenStreetMap View
                         val mapView = rememberMapViewWithLifecycle()
+                        val actualGpsDisabled = !Geolocator.isGpsEnabled(context) || isGpsDisabled
+
                         AndroidView(
                             factory = { mapView },
                             modifier = Modifier.fillMaxSize()
@@ -261,52 +264,54 @@ fun SafeJourneyScreen(
                             mv.overlays.clear()
 
                             val userLatLng = currentGpsLatLng
-                            val userGeoPoint = GeoPoint(userLatLng.latitude, userLatLng.longitude)
+                            if (userLatLng != null && !actualGpsDisabled && !isPermissionDenied) {
+                                val userGeoPoint = GeoPoint(userLatLng.latitude, userLatLng.longitude)
 
-                            // Set camera center and zoom
-                            mv.controller.setCenter(userGeoPoint)
-                            mv.controller.setZoom(15.5)
+                                // Center the map on the user's live location after GPS is acquired
+                                mv.controller.setCenter(userGeoPoint)
+                                mv.controller.setZoom(15.5)
 
-                            // User location marker
-                            val userMarker = OsmMarker(mv).apply {
-                                position = userGeoPoint
-                                setAnchor(OsmMarker.ANCHOR_CENTER, OsmMarker.ANCHOR_BOTTOM)
-                                title = "My Location"
-                            }
-                            mv.overlays.add(userMarker)
-
-                            if (destination != null) {
-                                if (routePoints.isNotEmpty()) {
-                                    val polyline = OsmPolyline().apply {
-                                        setPoints(routePoints.map { GeoPoint(it.latitude, it.longitude) })
-                                        color = 0xFFFF004D.toInt()
-                                        width = 8f
-                                    }
-                                    mv.overlays.add(polyline)
-
-                                    val points = routePoints.map { GeoPoint(it.latitude, it.longitude) }
-                                    if (points.isNotEmpty()) {
-                                        val minLat = points.minOf { it.latitude }
-                                        val maxLat = points.maxOf { it.latitude }
-                                        val minLon = points.minOf { it.longitude }
-                                        val maxLon = points.maxOf { it.longitude }
-                                        val box = org.osmdroid.util.BoundingBox(maxLat, maxLon, minLat, minLon)
-                                        mv.zoomToBoundingBox(box, true, 80)
-                                    }
-                                }
-
-                                val endLatLng = destLatLng ?: LatLng(userLatLng.latitude + 0.015, userLatLng.longitude + 0.015)
-                                val destGeoPoint = GeoPoint(endLatLng.latitude, endLatLng.longitude)
-                                val destMarker = OsmMarker(mv).apply {
-                                    position = destGeoPoint
+                                // User location marker (Update in real-time as user moves)
+                                val userMarker = OsmMarker(mv).apply {
+                                    position = userGeoPoint
                                     setAnchor(OsmMarker.ANCHOR_CENTER, OsmMarker.ANCHOR_BOTTOM)
-                                    title = destination
+                                    title = "My Location"
                                 }
-                                mv.overlays.add(destMarker)
+                                mv.overlays.add(userMarker)
 
-                                if (routePoints.isEmpty()) {
-                                    mv.controller.setCenter(destGeoPoint)
-                                    mv.controller.setZoom(14.0)
+                                if (destination != null) {
+                                    if (routePoints.isNotEmpty()) {
+                                        val polyline = OsmPolyline().apply {
+                                            setPoints(routePoints.map { GeoPoint(it.latitude, it.longitude) })
+                                            color = 0xFFFF004D.toInt()
+                                            width = 8f
+                                        }
+                                        mv.overlays.add(polyline)
+
+                                        val points = routePoints.map { GeoPoint(it.latitude, it.longitude) }
+                                        if (points.isNotEmpty()) {
+                                            val minLat = points.minOf { it.latitude }
+                                            val maxLat = points.maxOf { it.latitude }
+                                            val minLon = points.minOf { it.longitude }
+                                            val maxLon = points.maxOf { it.longitude }
+                                            val box = org.osmdroid.util.BoundingBox(maxLat, maxLon, minLat, minLon)
+                                            mv.zoomToBoundingBox(box, true, 80)
+                                        }
+                                    }
+
+                                    val endLatLng = destLatLng ?: LatLng(userLatLng.latitude + 0.015, userLatLng.longitude + 0.015)
+                                    val destGeoPoint = GeoPoint(endLatLng.latitude, endLatLng.longitude)
+                                    val destMarker = OsmMarker(mv).apply {
+                                        position = destGeoPoint
+                                        setAnchor(OsmMarker.ANCHOR_CENTER, OsmMarker.ANCHOR_BOTTOM)
+                                        title = destination
+                                    }
+                                    mv.overlays.add(destMarker)
+
+                                    if (routePoints.isEmpty()) {
+                                        mv.controller.setCenter(destGeoPoint)
+                                        mv.controller.setZoom(14.0)
+                                    }
                                 }
                             }
 
@@ -360,7 +365,7 @@ fun SafeJourneyScreen(
                         }
 
                         // Error State Overlays on map
-                        if (isGpsDisabled) {
+                        if (actualGpsDisabled) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -371,7 +376,7 @@ fun SafeJourneyScreen(
                                     Icon(Icons.Default.GpsOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(40.dp))
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text("GPS SIGNAL DISABLED", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    Text("Enable GPS sensor telemetry in simulation overrides.", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, textAlign = TextAlign.Center)
+                                    Text("Please enable GPS sensor on your device for accurate tracking.", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, textAlign = TextAlign.Center)
                                 }
                             }
                         } else if (isPermissionDenied) {
@@ -385,7 +390,21 @@ fun SafeJourneyScreen(
                                     Icon(Icons.Default.NoEncryption, contentDescription = null, tint = Color.White, modifier = Modifier.size(40.dp))
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Text("LOCATION ACCESS DENIED", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    Text("Grant location permission in device simulator panel.", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, textAlign = TextAlign.Center)
+                                    Text("Grant location permissions to trace your journey in real time.", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, textAlign = TextAlign.Center)
+                                }
+                            }
+                        } else if (currentGpsLatLng == null) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.75f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(16.dp)) {
+                                    CircularProgressIndicator(color = Color(0xFFFF004D))
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text("ACQUIRING GPS LOCK...", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    Text("Detecting real satellite coordinates...", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, textAlign = TextAlign.Center)
                                 }
                             }
                         }
@@ -423,7 +442,7 @@ fun SafeJourneyScreen(
                             trailingIcon = {
                                 if (searchQuery.isNotEmpty()) {
                                     IconButton(onClick = { searchQuery = "" }) {
-                                        Icon(Icons.Default.Close, contentDescription = "Clear Search")
+                                        Icon(Icons.Default.Close, contentDescription = "Clear Search", tint = Color(0xFF301114))
                                     }
                                 }
                             },
@@ -436,7 +455,13 @@ fun SafeJourneyScreen(
                                 focusedBorderColor = Color(0xFFFF004D),
                                 unfocusedBorderColor = Color(0xFFFF004D).copy(alpha = 0.2f),
                                 focusedContainerColor = Color.White,
-                                unfocusedContainerColor = Color.White
+                                unfocusedContainerColor = Color.White,
+                                focusedTextColor = Color(0xFF301114),
+                                unfocusedTextColor = Color(0xFF301114),
+                                focusedPlaceholderColor = Color.Gray,
+                                unfocusedPlaceholderColor = Color.Gray,
+                                focusedLeadingIconColor = Color(0xFFFF004D),
+                                unfocusedLeadingIconColor = Color.Gray
                             )
                         )
 
@@ -450,7 +475,7 @@ fun SafeJourneyScreen(
                                 colors = CardDefaults.cardColors(containerColor = Color.White),
                                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
                                 shape = RoundedCornerShape(16.dp),
-                                border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.1f)),
+                                border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.15f)),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(modifier = Modifier.padding(vertical = 8.dp)) {
@@ -484,7 +509,7 @@ fun SafeJourneyScreen(
                                                 Text(
                                                     text = loc,
                                                     fontSize = 14.sp,
-                                                    color = Color.DarkGray,
+                                                    color = Color(0xFF301114),
                                                     fontWeight = FontWeight.Medium
                                                 )
                                             }
@@ -524,7 +549,7 @@ fun SafeJourneyScreen(
                                     shape = RoundedCornerShape(12.dp),
                                     border = BorderStroke(
                                         width = 1.dp,
-                                        color = if (selected) Color.Transparent else Color(0xFFFF004D).copy(alpha = 0.2f)
+                                        color = if (selected) Color.Transparent else Color(0xFFFF004D).copy(alpha = 0.15f)
                                     ),
                                     modifier = Modifier
                                         .weight(1f)
@@ -556,7 +581,7 @@ fun SafeJourneyScreen(
                         colors = CardDefaults.cardColors(containerColor = Color.White),
                         shape = RoundedCornerShape(24.dp),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                        border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.1f)),
+                        border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.15f)),
                         modifier = Modifier.fillMaxWidth().testTag("journey_card")
                     ) {
                         Column(
@@ -588,7 +613,7 @@ fun SafeJourneyScreen(
                                         text = journeyStatus.uppercase(),
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Black,
-                                        color = Color.DarkGray
+                                        color = Color(0xFF301114)
                                     )
                                 }
 
@@ -754,7 +779,7 @@ fun SafeJourneyScreen(
                                 Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(Color(0xFFFCE8EB), RoundedCornerShape(12.dp))
+                                        .background(Color(0xFFFFF1F2), RoundedCornerShape(12.dp))
                                         .padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
@@ -868,7 +893,7 @@ fun SafeJourneyScreen(
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color.White),
                     shape = RoundedCornerShape(24.dp),
-                    border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.1f)),
+                    border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.15f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
@@ -946,10 +971,10 @@ fun SafeJourneyScreen(
                     .imePadding()
             ) {
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
                     shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
                     elevation = CardDefaults.cardElevation(defaultElevation = 16.dp),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+                    border = BorderStroke(1.dp, Color(0xFFFF004D).copy(alpha = 0.15f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -970,11 +995,11 @@ fun SafeJourneyScreen(
                                 letterSpacing = 1.sp
                             )
                             IconButton(onClick = { showSimulatorDrawer = false }) {
-                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF301114))
                             }
                         }
 
-                        Divider(color = Color.White.copy(alpha = 0.1f))
+                        Divider(color = Color.LightGray.copy(alpha = 0.4f))
 
                         // Switch 1: GPS Disabled
                         Row(
@@ -983,7 +1008,7 @@ fun SafeJourneyScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text("GPS Sensor Failure", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text("GPS Sensor Failure", color = Color(0xFF301114), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 Text("Simulate active GPS loss / disabled sensor", color = Color.Gray, fontSize = 11.sp)
                             }
                             Switch(
@@ -1000,7 +1025,7 @@ fun SafeJourneyScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text("No Network Signal", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text("No Network Signal", color = Color(0xFF301114), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 Text("Buffers telemetry locally; blocks Firebase sync", color = Color.Gray, fontSize = 11.sp)
                             }
                             Switch(
@@ -1017,7 +1042,7 @@ fun SafeJourneyScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text("Location Permission Denied", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text("Location Permission Denied", color = Color(0xFF301114), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 Text("Mock runtime request dismissal", color = Color.Gray, fontSize = 11.sp)
                             }
                             Switch(
@@ -1034,7 +1059,7 @@ fun SafeJourneyScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text("Places API Fail", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text("Places API Fail", color = Color(0xFF301114), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 Text("Forced Destination lookup failure on Search", color = Color.Gray, fontSize = 11.sp)
                             }
                             Switch(
@@ -1051,7 +1076,7 @@ fun SafeJourneyScreen(
             if (showCheckInDialog) {
                 Dialog(onDismissRequest = { /* Force response to prevent dismiss */ }) {
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
                         shape = RoundedCornerShape(24.dp),
                         border = BorderStroke(2.dp, Color(0xFFFF004D)),
                         modifier = Modifier
@@ -1096,7 +1121,7 @@ fun SafeJourneyScreen(
                                 text = "Are You Safe?",
                                 fontSize = 24.sp,
                                 fontWeight = FontWeight.Black,
-                                color = Color.White
+                                color = Color(0xFF301114)
                             )
 
                             Spacer(modifier = Modifier.height(8.dp))
@@ -1104,7 +1129,7 @@ fun SafeJourneyScreen(
                             Text(
                                 text = "Safe Journey Interval check required. Confirm safety or request emergency assistance immediately.",
                                 fontSize = 13.sp,
-                                color = Color.LightGray,
+                                color = Color.Gray,
                                 textAlign = TextAlign.Center
                             )
 
@@ -1125,7 +1150,7 @@ fun SafeJourneyScreen(
                                     .height(6.dp)
                                     .clip(CircleShape),
                                 color = Color(0xFFFF004D),
-                                trackColor = Color.White.copy(alpha = 0.1f)
+                                trackColor = Color(0xFFFF004D).copy(alpha = 0.15f)
                             )
 
                             Spacer(modifier = Modifier.height(24.dp))

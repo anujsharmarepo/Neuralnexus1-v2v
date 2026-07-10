@@ -2,6 +2,11 @@ package com.example.ui.viewmodel
 
 import android.content.Context
 import android.hardware.camera2.CameraManager
+import com.google.firebase.firestore.FirebaseFirestore
+import android.telephony.SmsManager
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
@@ -19,6 +24,8 @@ import kotlin.math.sin
 import kotlinx.coroutines.Dispatchers
 import com.example.ui.screens.LatLng
 import com.example.ui.screens.MapsService
+import com.example.ui.screens.Geolocator
+import com.example.ui.screens.LocationAccuracy
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -46,7 +53,7 @@ sealed interface AuthUiState {
 
 class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle.AndroidViewModel(application) {
     private val userRepository: UserRepository = UserRepositoryImpl(application)
-    private val guardiansRepository: GuardiansRepository = GuardiansRepositoryImpl()
+    private val guardiansRepository: GuardiansRepository = GuardiansRepositoryImpl(application)
 
     // Auth flows
     val currentUser: StateFlow<User?> = userRepository.currentUser
@@ -110,14 +117,18 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     private val _firebaseStatus = MutableStateFlow("Pending")
     val firebaseStatus: StateFlow<String> = _firebaseStatus.asStateFlow()
 
-    private val _gpsCoords = MutableStateFlow(Pair(18.5204, 73.8567))
-    val gpsCoords: StateFlow<Pair<Double, Double>> = _gpsCoords.asStateFlow()
+    private val _gpsCoords = MutableStateFlow<Pair<Double, Double>?>(null)
+    val gpsCoords: StateFlow<Pair<Double, Double>?> = _gpsCoords.asStateFlow()
 
     private val _sosPin = MutableStateFlow("1234")
     val sosPin: StateFlow<String> = _sosPin.asStateFlow()
 
     private val _emergencyHistory = MutableStateFlow<List<EmergencyHistoryItem>>(emptyList())
     val emergencyHistory: StateFlow<List<EmergencyHistoryItem>> = _emergencyHistory.asStateFlow()
+
+    // Police Fetch States
+    private val _policeFetchStatus = MutableStateFlow<String>("Idle") // Idle, Loading, Success, NoStations, Error
+    val policeFetchStatus: StateFlow<String> = _policeFetchStatus.asStateFlow()
 
     // Safe Journey States
     private val _showSafeJourneyScreen = MutableStateFlow(false)
@@ -171,8 +182,8 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     private val _placeSuggestions = MutableStateFlow<List<String>>(emptyList())
     val placeSuggestions: StateFlow<List<String>> = _placeSuggestions.asStateFlow()
 
-    private val _currentLatLng = MutableStateFlow<LatLng>(LatLng(18.5204, 73.8567))
-    val currentLatLng: StateFlow<LatLng> = _currentLatLng.asStateFlow()
+    private val _currentLatLng = MutableStateFlow<LatLng?>(null)
+    val currentLatLng: StateFlow<LatLng?> = _currentLatLng.asStateFlow()
 
     // Safe Journey Edge Case Selectors (For comprehensive testing in UI)
     val gpsDisabled = MutableStateFlow(false)
@@ -188,12 +199,145 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     private var flashlightController: FlashlightController? = null
     private var audioRecorder: SafeAudioRecorder? = null
 
+    private var firestoreSyncJob: Job? = null
+    private var currentSessionId: String? = null
+    private var currentAudioPath: String? = null
+
+    private var mediaPlayer: android.media.MediaPlayer? = null
+    private val _playingAudioPath = MutableStateFlow<String?>(null)
+    val playingAudioPath: StateFlow<String?> = _playingAudioPath.asStateFlow()
+
+    fun playRecording(path: String) {
+        if (_playingAudioPath.value == path) {
+            stopPlaying()
+            return
+        }
+        stopPlaying()
+        try {
+            mediaPlayer = android.media.MediaPlayer().apply {
+                setDataSource(path)
+                prepare()
+                start()
+                setOnCompletionListener {
+                    stopPlaying()
+                }
+            }
+            _playingAudioPath.value = path
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun stopPlaying() {
+        try {
+            mediaPlayer?.stop()
+            mediaPlayer?.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            mediaPlayer = null
+            _playingAudioPath.value = null
+        }
+    }
+
     init {
         _emergencyHistory.value = loadEmergencyHistory()
         _journeyHistory.value = loadJourneyHistory()
         val context = getApplication<android.app.Application>()
         val pinPrefs = context.getSharedPreferences("abhaya_security_prefs", Context.MODE_PRIVATE)
         _sosPin.value = pinPrefs.getString("sos_pin", "1234") ?: "1234"
+        startLocationUpdates()
+    }
+
+    private var locationJob: Job? = null
+    private var lastFetchLatLng: LatLng? = null
+    private var lastFetchTime: Long = 0L
+
+    private fun calculateHaversineDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371.0 // Radius of the earth in km
+        val latDistance = Math.toRadians(lat2 - lat1)
+        val lonDistance = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(latDistance / 2) * Math.sin(latDistance / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(lonDistance / 2) * Math.sin(lonDistance / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return r * c
+    }
+
+    fun checkAndFetchNearbyPolice(latLng: LatLng, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        val lastLatLng = lastFetchLatLng
+        val distanceMoved = if (lastLatLng != null) {
+            calculateHaversineDistance(lastLatLng.latitude, lastLatLng.longitude, latLng.latitude, latLng.longitude)
+        } else {
+            Double.MAX_VALUE
+        }
+        
+        // Fetch if first time, moved more than 300 meters, or more than 2 minutes have passed (or forced)
+        if (force || lastLatLng == null || distanceMoved > 0.3 || (now - lastFetchTime) > 120_000) {
+            lastFetchLatLng = latLng
+            lastFetchTime = now
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    _policeFetchStatus.value = "Loading"
+                    val stations = MapsService.fetchNearbyPoliceStationsOverpass(latLng)
+                    if (stations.isNotEmpty()) {
+                        _nearbyPoliceStations.value = stations
+                        _policeFetchStatus.value = "Success"
+                    } else {
+                        // Fallback to Nominatim if Overpass is empty or rate-limited
+                        val fallbackStations = MapsService.fetchNearbyPoliceStations(latLng)
+                        if (fallbackStations.isNotEmpty()) {
+                            _nearbyPoliceStations.value = fallbackStations
+                            _policeFetchStatus.value = "Success"
+                        } else {
+                            _nearbyPoliceStations.value = emptyList()
+                            _policeFetchStatus.value = "NoStations"
+                        }
+                    }
+                } catch (e: Exception) {
+                    _policeFetchStatus.value = "Error"
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun startLocationUpdates() {
+        if (locationJob != null && locationJob?.isActive == true) return
+        val context = getApplication<android.app.Application>()
+        locationJob = viewModelScope.launch {
+            try {
+                while (true) {
+                    val fineGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    val coarseGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.ACCESS_COARSE_LOCATION
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    
+                    if (fineGranted || coarseGranted) {
+                        break
+                    }
+                    delay(2000)
+                }
+                
+                Geolocator.getPositionStream(context, LocationAccuracy.bestForNavigation)
+                    .collect { latLng ->
+                        _currentLatLng.value = latLng
+                        checkAndFetchNearbyPolice(latLng)
+                    }
+            } catch (e: SecurityException) {
+                permissionDenied.value = true
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun stopLocationUpdates() {
+        locationJob?.cancel()
+        locationJob = null
     }
 
     fun openSafeJourney() {
@@ -233,25 +377,34 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
 
         val context = getApplication<android.app.Application>()
         val originPair = getLiveLocation(context)
-        val originLatLng = LatLng(originPair.first, originPair.second)
-        _currentLatLng.value = originLatLng
+        val originLatLng = if (originPair != null) {
+            LatLng(originPair.first, originPair.second)
+        } else {
+            _currentLatLng.value
+        }
         
-        if (!internetUnavailable.value && MapsService.isNetworkAvailable(context)) {
-            viewModelScope.launch(Dispatchers.IO) {
-                val result = MapsService.fetchDirections(originLatLng, dest)
-                if (result != null) {
-                    _journeyDistance.value = result.distanceKm
-                    _journeyEta.value = result.durationMins
-                    _routePolylinePoints.value = result.polylinePoints
-                    _destinationLatLng.value = result.destinationLatLng
-                    
-                    val policeStations = MapsService.fetchNearbyPoliceStations(originLatLng)
-                    _nearbyPoliceStations.value = policeStations
-                } else {
-                    calculateFallbackRoute(dest)
+        if (originLatLng != null) {
+            _currentLatLng.value = originLatLng
+            if (!internetUnavailable.value && MapsService.isNetworkAvailable(context)) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    val result = MapsService.fetchDirections(originLatLng, dest)
+                    if (result != null) {
+                        _journeyDistance.value = result.distanceKm
+                        _journeyEta.value = result.durationMins
+                        _routePolylinePoints.value = result.polylinePoints
+                        _destinationLatLng.value = result.destinationLatLng
+                        
+                        val policeStations = MapsService.fetchNearbyPoliceStations(originLatLng)
+                        _nearbyPoliceStations.value = policeStations
+                    } else {
+                        calculateFallbackRoute(dest)
+                    }
                 }
+            } else {
+                calculateFallbackRoute(dest)
             }
         } else {
+            _alertMessage.value = "Waiting for real GPS location... Please ensure GPS is enabled."
             calculateFallbackRoute(dest)
         }
         return true
@@ -307,7 +460,9 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
                 // Periodically update live current location
                 if (_journeyTimerSeconds.value % 5 == 0) {
                     val location = getLiveLocation(context)
-                    _currentLatLng.value = LatLng(location.first, location.second)
+                    if (location != null) {
+                        _currentLatLng.value = LatLng(location.first, location.second)
+                    }
                 }
 
                 // Decrement ETA slightly over time for premium feedback loop (every 30 seconds of real-time elapsed)
@@ -570,6 +725,36 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         _sosTriggered.value = false
         _sosHoldProgress.value = 0f
         
+        // Stop Firestore upload loop
+        firestoreSyncJob?.cancel()
+        firestoreSyncJob = null
+        
+        // Finalize state in Firestore as "RESOLVED"
+        val finalSessionId = currentSessionId
+        if (finalSessionId != null) {
+            val lastLoc = _gpsCoords.value
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                    val finalData = hashMapOf(
+                        "sessionId" to finalSessionId,
+                        "userId" to (currentUser.value?.uid ?: "anonymous"),
+                        "userEmail" to (currentUser.value?.email ?: "anonymous@example.com"),
+                        "userName" to (currentUser.value?.name ?: "Anonymous"),
+                        "latitude" to (lastLoc?.first ?: 0.0),
+                        "longitude" to (lastLoc?.second ?: 0.0),
+                        "timestamp" to System.currentTimeMillis(),
+                        "emergencyStatus" to "RESOLVED",
+                        "guardianStatus" to "Deactivated / Resolved"
+                    )
+                    db.collection("sos_telemetry").add(finalData)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+        currentSessionId = null
+        
         // Turn off Flashlight
         try {
             flashlightController?.setTorchMode(false)
@@ -578,7 +763,16 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         }
         _isFlashlightOn.value = false
         
-        // Stop Siren
+        // Stop Foreground Service
+        val context = getApplication<android.app.Application>()
+        try {
+            val serviceIntent = Intent(context, com.example.service.SosService::class.java)
+            context.stopService(serviceIntent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Stop Siren (locally if it was running)
         try {
             sirenPlayer?.stop()
         } catch (e: Exception) {
@@ -586,7 +780,7 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         }
         _isSirenOn.value = false
         
-        // Stop Recording
+        // Stop Recording (locally if it was running)
         try {
             audioRecorder?.stopRecording()
         } catch (e: Exception) {
@@ -596,7 +790,17 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         recordingJob?.cancel()
         recordingJob = null
         
-        _alertMessage.value = "Emergency alert deactivated safely."
+        stopPlaying()
+        
+        if (currentAudioPath == null) {
+            currentAudioPath = com.example.service.SosService.currentAudioPath
+        }
+        val recordPath = currentAudioPath
+        if (recordPath != null) {
+            _alertMessage.value = "Emergency alert deactivated safely. Recording saved at:\n$recordPath"
+        } else {
+            _alertMessage.value = "Emergency alert deactivated safely."
+        }
     }
 
     fun toggleFlashlight() {
@@ -614,18 +818,31 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     }
 
     fun toggleSiren() {
-        if (sirenPlayer == null) {
-            sirenPlayer = SirenPlayer()
-        }
+        val context = getApplication<android.app.Application>()
         val newState = !_isSirenOn.value
-        try {
-            if (newState) {
-                sirenPlayer?.start()
-            } else {
-                sirenPlayer?.stop()
+        
+        if (com.example.service.SosService.isServiceRunning) {
+            try {
+                val intent = Intent(context, com.example.service.SosService::class.java).apply {
+                    action = if (newState) com.example.service.SosService.ACTION_START_SIREN else com.example.service.SosService.ACTION_STOP_SIREN
+                }
+                context.startService(intent)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } else {
+            if (sirenPlayer == null) {
+                sirenPlayer = SirenPlayer()
+            }
+            try {
+                if (newState) {
+                    sirenPlayer?.start()
+                } else {
+                    sirenPlayer?.stop()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         _isSirenOn.value = newState
     }
@@ -633,52 +850,12 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
     fun activateEmergencyProtocols() {
         val context = getApplication<android.app.Application>()
 
-        // 1. Get location
-        val location = getLiveLocation(context)
-        _gpsCoords.value = location
-        _liveLocationStatus.value = "Maps Shared: https://maps.google.com/?q=${location.first},${location.second}"
+        // Establish the session
+        val sessionId = System.currentTimeMillis().toString()
+        currentSessionId = sessionId
 
-        // 2. Fetch guardians and send SMS
-        val activeGuardians = guardians.value.filter { it.isActive }.take(5)
-        if (activeGuardians.isNotEmpty()) {
-            val names = activeGuardians.joinToString { it.name }
-            _smsStatus.value = "SMS Sent to: $names"
-            try {
-                val smsManager = android.telephony.SmsManager.getDefault()
-                for (guardian in activeGuardians) {
-                    smsManager.sendTextMessage(
-                        guardian.phone, 
-                        null, 
-                        "EMERGENCY! Abhaya SOS triggered. Help me! Live location: https://maps.google.com/?q=${location.first},${location.second}", 
-                        null, 
-                        null
-                    )
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        } else {
-            _smsStatus.value = "No active guardians found to send SMS."
-        }
-
-        // 3. Call primary guardian
-        val primaryGuardian = activeGuardians.firstOrNull()
-        if (primaryGuardian != null) {
-            _callingStatus.value = "Calling ${primaryGuardian.name} (${primaryGuardian.phone})"
-            try {
-                val intent = android.content.Intent(android.content.Intent.ACTION_DIAL).apply {
-                    data = android.net.Uri.parse("tel:${primaryGuardian.phone}")
-                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        } else {
-            _callingStatus.value = "No guardian configured to call."
-        }
-
-        // 4. Turn Flashlight ON
+        // 1. Immediately activate local signaling device protocols (Flashlight, Siren, Audio Recording)
+        // Turn Flashlight ON
         if (flashlightController == null) {
             flashlightController = FlashlightController(context)
         }
@@ -689,26 +866,40 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         }
         _isFlashlightOn.value = true
 
-        // 5. Play Loud Siren
-        if (sirenPlayer == null) {
-            sirenPlayer = SirenPlayer()
-        }
+        // Play Loud Siren & Start Audio Recording via Foreground Service (for background survivability)
         try {
-            sirenPlayer?.start()
+            val serviceIntent = Intent(context, com.example.service.SosService::class.java).apply {
+                action = com.example.service.SosService.ACTION_START_SOS
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+            currentAudioPath = com.example.service.SosService.currentAudioPath
         } catch (e: Exception) {
             e.printStackTrace()
+            
+            // Fallback locally if Service fails
+            if (sirenPlayer == null) {
+                sirenPlayer = SirenPlayer()
+            }
+            try {
+                sirenPlayer?.start()
+            } catch (ex: Exception) {
+                ex.printStackTrace()
+            }
+            if (audioRecorder == null) {
+                audioRecorder = SafeAudioRecorder(context)
+            }
+            try {
+                currentAudioPath = audioRecorder?.startRecording()
+            } catch (ex: Exception) {
+                ex.printStackTrace()
+            }
         }
-        _isSirenOn.value = true
 
-        // 6. Start Audio Recording
-        if (audioRecorder == null) {
-            audioRecorder = SafeAudioRecorder(context)
-        }
-        try {
-            audioRecorder?.startRecording()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        _isSirenOn.value = true
         _isRecording.value = true
         _recordingSeconds.value = 0
         recordingJob?.cancel()
@@ -716,24 +907,239 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
             while (_isRecording.value) {
                 delay(1000)
                 _recordingSeconds.value += 1
+                if (currentAudioPath == null) {
+                    currentAudioPath = com.example.service.SosService.currentAudioPath
+                }
             }
         }
 
-        // 7. Store Emergency History and Sync with Firebase
-        val timestamp = System.currentTimeMillis()
-        val sdf = java.text.SimpleDateFormat("dd MMM yyyy, HH:mm:ss", java.util.Locale.getDefault())
-        val dateStr = sdf.format(java.util.Date(timestamp))
-        val newItem = EmergencyHistoryItem(
-            id = timestamp.toString(),
-            timestamp = timestamp,
-            latitude = location.first,
-            longitude = location.second,
-            dateString = dateStr,
-            status = "ACTIVE"
-        )
-        
-        saveEmergencyToHistory(newItem)
-        syncWithFirebase(newItem)
+        // IMMEDIATELY trigger WhatsApp redirection with fast/cached location for maximum responsiveness
+        viewModelScope.launch {
+            val fastLoc = getLiveLocation(context)
+            val lat = fastLoc?.first ?: 28.6139  // Default if null
+            val lng = fastLoc?.second ?: 77.2090
+            val fastMapsUrl = "https://www.google.com/maps/search/?api=1&query=$lat,$lng"
+            
+            val activeG = guardians.value.filter { it.isActive }.take(5)
+            val primaryG = activeG.firstOrNull()
+            
+            val msgText = if (fastLoc != null) {
+                "EMERGENCY! Abhaya SOS triggered. Help me! Live location: $fastMapsUrl"
+            } else {
+                "EMERGENCY! Abhaya SOS triggered. Help me! Location link updating..."
+            }
+            
+            try {
+                val encodedMsg = java.net.URLEncoder.encode(msgText, "UTF-8")
+                val sanitizedPh = primaryG?.phone?.filter { it.isDigit() } ?: ""
+                val uriStr = if (sanitizedPh.isNotEmpty()) {
+                    "whatsapp://send?phone=$sanitizedPh&text=$encodedMsg"
+                } else {
+                    "whatsapp://send?text=$encodedMsg"
+                }
+                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                    data = android.net.Uri.parse(uriStr)
+                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                try {
+                    val encodedMsg = java.net.URLEncoder.encode(msgText, "UTF-8")
+                    val sanitizedPh = primaryG?.phone?.filter { it.isDigit() } ?: ""
+                    val webUriStr = if (sanitizedPh.isNotEmpty()) {
+                        "https://api.whatsapp.com/send?phone=$sanitizedPh&text=$encodedMsg"
+                    } else {
+                        "https://api.whatsapp.com/send?text=$encodedMsg"
+                    }
+                    val webIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                        data = android.net.Uri.parse(webUriStr)
+                        flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(webIntent)
+                } catch (ex: Exception) {
+                    ex.printStackTrace()
+                }
+            }
+        }
+
+        // Set initial status values
+        _liveLocationStatus.value = "Acquiring high-accuracy GPS..."
+        _smsStatus.value = "Waiting for high-accuracy GPS..."
+        _callingStatus.value = "Waiting for high-accuracy GPS..."
+        _firebaseStatus.value = "Waiting for high-accuracy GPS..."
+        _gpsCoords.value = null
+
+        // 2. Launch coroutine to fetch high-accuracy location asynchronously and send alerts
+        viewModelScope.launch {
+            var latLng: LatLng? = null
+            try {
+                if (!Geolocator.isGpsEnabled(context)) {
+                    throw Exception("GPS is disabled")
+                }
+                // Wait for valid high-accuracy location
+                latLng = Geolocator.getCurrentPosition(context, LocationAccuracy.bestForNavigation)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                // Try fallback to last known location as secondary measure
+                val fallback = getLiveLocation(context)
+                if (fallback != null) {
+                    latLng = LatLng(fallback.first, fallback.second)
+                    _liveLocationStatus.value = "GPS Warning: Fallback coordinates used"
+                } else {
+                    _liveLocationStatus.value = "GPS Error: ${e.message}"
+                    _smsStatus.value = "Failed: GPS unavailable"
+                    _callingStatus.value = "Failed: GPS unavailable"
+                    _firebaseStatus.value = "Failed: GPS unavailable"
+                    _alertMessage.value = "GPS Error: GPS location could not be acquired (${e.message ?: "Disabled"})."
+                }
+            }
+
+            if (latLng != null) {
+                // Save coordinates
+                _gpsCoords.value = Pair(latLng.latitude, latLng.longitude)
+                _currentLatLng.value = latLng
+                val mapsUrl = "https://www.google.com/maps/search/?api=1&query=${latLng.latitude},${latLng.longitude}"
+                _liveLocationStatus.value = "Maps Link: $mapsUrl"
+
+                // Store Emergency History
+                val timestamp = System.currentTimeMillis()
+                val sdf = java.text.SimpleDateFormat("dd MMM yyyy, HH:mm:ss", java.util.Locale.getDefault())
+                val dateStr = sdf.format(java.util.Date(timestamp))
+                val newItem = EmergencyHistoryItem(
+                    id = timestamp.toString(),
+                    timestamp = timestamp,
+                    latitude = latLng.latitude,
+                    longitude = latLng.longitude,
+                    dateString = dateStr,
+                    status = "ACTIVE",
+                    audioPath = currentAudioPath
+                )
+                saveEmergencyToHistory(newItem)
+
+                // 3. Automatically send emergency SMS to all saved guardians
+                val activeGuardians = guardians.value.filter { it.isActive }.take(5)
+                if (activeGuardians.isNotEmpty()) {
+                    try {
+                        val smsManager: android.telephony.SmsManager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                            context.getSystemService(android.telephony.SmsManager::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            android.telephony.SmsManager.getDefault()
+                        }
+                        val smsMessage = "EMERGENCY! Abhaya SOS triggered. Help me! Live location: $mapsUrl"
+                        for (guardian in activeGuardians) {
+                            smsManager.sendTextMessage(guardian.phone, null, smsMessage, null, null)
+                        }
+                        _smsStatus.value = "SMS Sent to: ${activeGuardians.joinToString { it.name }}"
+                    } catch (e: SecurityException) {
+                        _smsStatus.value = "SMS Permission Denied"
+                        _alertMessage.value = "SMS failed: Permission denied. Please grant SEND_SMS permission."
+                    } catch (e: Exception) {
+                        _smsStatus.value = "SMS Failed: ${e.message}"
+                    }
+                } else {
+                    _smsStatus.value = "No active guardians found."
+                }
+
+                // 4. Implement real guardian calling
+                val primaryGuardian = activeGuardians.firstOrNull()
+                if (primaryGuardian != null) {
+                    val hasTelephony = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEPHONY)
+                    val callGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.CALL_PHONE
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+                    if (hasTelephony && callGranted) {
+                        try {
+                            val intent = android.content.Intent(android.content.Intent.ACTION_CALL).apply {
+                                data = android.net.Uri.parse("tel:${primaryGuardian.phone}")
+                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            context.startActivity(intent)
+                            _callingStatus.value = "Calling: ${primaryGuardian.name}"
+                        } catch (e: Exception) {
+                            val intent = android.content.Intent(android.content.Intent.ACTION_DIAL).apply {
+                                data = android.net.Uri.parse("tel:${primaryGuardian.phone}")
+                                flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            context.startActivity(intent)
+                            _callingStatus.value = "Dialer: ${primaryGuardian.name}"
+                        }
+                    } else {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_DIAL).apply {
+                            data = android.net.Uri.parse("tel:${primaryGuardian.phone}")
+                            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(intent)
+                        _callingStatus.value = "Dialer: ${primaryGuardian.name}"
+                    }
+                } else {
+                    _callingStatus.value = "No guardian configured."
+                }
+
+                // 6. Upload live GPS location to Firebase Firestore every 5 seconds while SOS is active
+                firestoreSyncJob?.cancel()
+                firestoreSyncJob = viewModelScope.launch(Dispatchers.IO) {
+                    while (_sosTriggered.value) {
+                        val currentLoc = _gpsCoords.value
+                        if (currentLoc != null) {
+                            val lat = currentLoc.first
+                            val lng = currentLoc.second
+
+                            val telemetryData = hashMapOf(
+                                "sessionId" to sessionId,
+                                "userId" to (currentUser.value?.uid ?: "anonymous"),
+                                "userEmail" to (currentUser.value?.email ?: "anonymous@example.com"),
+                                "userName" to (currentUser.value?.name ?: "Anonymous"),
+                                "latitude" to lat,
+                                "longitude" to lng,
+                                "timestamp" to System.currentTimeMillis(),
+                                "emergencyStatus" to "ACTIVE",
+                                "guardianStatus" to "${_smsStatus.value} | ${_callingStatus.value}"
+                            )
+
+                            try {
+                                if (internetUnavailable.value || !MapsService.isNetworkAvailable(context)) {
+                                    throw Exception("No internet connection")
+                                }
+
+                                _firebaseStatus.value = "Syncing..."
+                                val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                                db.collection("sos_telemetry")
+                                    .add(telemetryData)
+                                    .addOnSuccessListener {
+                                        _firebaseStatus.value = "Synced"
+                                    }
+                                    .addOnFailureListener { e ->
+                                        _firebaseStatus.value = "Error: ${e.message}"
+                                    }
+                            } catch (e: Exception) {
+                                _firebaseStatus.value = "Error: ${e.message ?: "No connection"}"
+                            }
+                        } else {
+                            _firebaseStatus.value = "Acquiring GPS..."
+                        }
+                        delay(5000)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isWhatsAppInstalled(context: Context): Boolean {
+        val pm = context.packageManager
+        return try {
+            pm.getPackageInfo("com.whatsapp", 0)
+            true
+        } catch (e: Exception) {
+            try {
+                pm.getPackageInfo("com.whatsapp.w4b", 0) // WhatsApp Business fallback
+                true
+            } catch (ex: Exception) {
+                false
+            }
+        }
     }
 
     private fun saveEmergencyToHistory(item: EmergencyHistoryItem) {
@@ -754,6 +1160,7 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
             editor.putFloat("history_${i}_lng", histItem.longitude.toFloat())
             editor.putString("history_${i}_date", histItem.dateString)
             editor.putString("history_${i}_status", histItem.status)
+            editor.putString("history_${i}_audio_path", histItem.audioPath)
         }
         editor.apply()
     }
@@ -770,8 +1177,9 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
             val lng = prefs.getFloat("history_${i}_lng", 0f).toDouble()
             val date = prefs.getString("history_${i}_date", "") ?: ""
             val status = prefs.getString("history_${i}_status", "ACTIVE") ?: "ACTIVE"
+            val audioPath = prefs.getString("history_${i}_audio_path", null)
             if (id.isNotEmpty()) {
-                list.add(EmergencyHistoryItem(id, timestamp, lat, lng, date, status))
+                list.add(EmergencyHistoryItem(id, timestamp, lat, lng, date, status, audioPath))
             }
         }
         return list
@@ -785,7 +1193,7 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         }
     }
 
-    private fun getLiveLocation(context: Context): Pair<Double, Double> {
+    private fun getLiveLocation(context: Context): Pair<Double, Double>? {
         try {
             val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
             if (lm != null) {
@@ -806,8 +1214,7 @@ class AbhayaViewModel(application: android.app.Application) : androidx.lifecycle
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        // Fallback coordinate
-        return Pair(18.5204, 73.8567)
+        return null
     }
 
     fun addGuardian(name: String, relation: String, phone: String) {
@@ -845,7 +1252,8 @@ data class EmergencyHistoryItem(
     val latitude: Double,
     val longitude: Double,
     val dateString: String,
-    val status: String
+    val status: String,
+    val audioPath: String? = null
 )
 
 data class SafeJourneyHistoryItem(
@@ -888,11 +1296,21 @@ class SafeAudioRecorder(private val context: Context) {
     fun startRecording(): String? {
         if (isRecording) return outputFile?.absolutePath
         try {
-            outputFile = File(context.cacheDir, "emergency_record_${System.currentTimeMillis()}.amr")
-            mediaRecorder = MediaRecorder().apply {
+            val dir = context.getExternalFilesDir("EmergencyRecordings") ?: File(context.filesDir, "EmergencyRecordings")
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+            outputFile = File(dir, "emergency_record_${System.currentTimeMillis()}.mp4")
+            
+            mediaRecorder = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                MediaRecorder(context)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }.apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.AMR_NB)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setOutputFile(outputFile?.absolutePath)
                 prepare()
                 start()
@@ -901,10 +1319,14 @@ class SafeAudioRecorder(private val context: Context) {
             return outputFile?.absolutePath
         } catch (e: Exception) {
             e.printStackTrace()
-            // Gracefully fallback to simulated file
+            // Gracefully fallback to files directory
             isRecording = true
-            outputFile = File(context.cacheDir, "emergency_record_simulated.amr")
             try {
+                val dir = File(context.filesDir, "EmergencyRecordings")
+                if (!dir.exists()) {
+                    dir.mkdirs()
+                }
+                outputFile = File(dir, "emergency_record_fallback.mp4")
                 outputFile?.createNewFile()
             } catch (ex: Exception) {
                 ex.printStackTrace()

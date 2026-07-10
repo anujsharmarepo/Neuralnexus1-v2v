@@ -10,6 +10,7 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Locale
 
 // Lightweight coordinate data model to fully decouple from Play Services
 data class LatLng(val latitude: Double, val longitude: Double)
@@ -203,6 +204,80 @@ object MapsService {
             }
         } catch (e: Exception) {
             Log.e("MapsService", "Error searching nearby police stations from Nominatim", e)
+            return emptyList()
+        }
+    }
+
+    // 4. Overpass API integration for retrieving real police stations
+    fun fetchNearbyPoliceStationsOverpass(location: LatLng): List<PoliceStation> {
+        try {
+            val query = """
+                [out:json][timeout:15];
+                (
+                  node["amenity"="police"](around:10000,${location.latitude},${location.longitude});
+                  way["amenity"="police"](around:10000,${location.latitude},${location.longitude});
+                  relation["amenity"="police"](around:10000,${location.latitude},${location.longitude});
+                );
+                out center;
+            """.trimIndent()
+            
+            val encodedQuery = URLEncoder.encode(query, "UTF-8")
+            val url = "https://overpass-api.de/api/interpreter?data=$encodedQuery"
+            
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "AbhayaSafetyApp/1.0 (anujsharma1555r@gmail.com)")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val body = response.body?.string() ?: return emptyList()
+                val json = JSONObject(body)
+                val elements = json.optJSONArray("elements") ?: return emptyList()
+                val list = mutableListOf<PoliceStation>()
+                
+                for (i in 0 until elements.length()) {
+                    val obj = elements.getJSONObject(i)
+                    val tags = obj.optJSONObject("tags")
+                    val name = tags?.optString("name", null) ?: tags?.optString("operator", null) ?: "Police Station"
+                    
+                    // Parse location
+                    val lat = if (obj.has("lat")) {
+                        obj.getDouble("lat")
+                    } else if (obj.has("center")) {
+                        obj.getJSONObject("center").getDouble("lat")
+                    } else {
+                        continue
+                    }
+                    val lon = if (obj.has("lon")) {
+                        obj.getDouble("lon")
+                    } else if (obj.has("center")) {
+                        obj.getJSONObject("center").getDouble("lon")
+                    } else {
+                        continue
+                    }
+                    
+                    val stationLatLng = LatLng(lat, lon)
+                    
+                    // Format address from tags
+                    val street = tags?.optString("addr:street", "") ?: ""
+                    val houseNumber = tags?.optString("addr:housenumber", "") ?: ""
+                    val city = tags?.optString("addr:city", "") ?: ""
+                    val postcode = tags?.optString("addr:postcode", "") ?: ""
+                    
+                    val addressParts = listOf(houseNumber, street, city, postcode).filter { it.isNotBlank() }
+                    val vicinity = if (addressParts.isNotEmpty()) {
+                        addressParts.joinToString(", ")
+                    } else {
+                        "Near coordinates: %.4f, %.4f".format(Locale.US, lat, lon)
+                    }
+                    
+                    list.add(PoliceStation(name, stationLatLng, vicinity))
+                }
+                return list
+            }
+        } catch (e: Exception) {
+            Log.e("MapsService", "Error calling Overpass API for police stations", e)
             return emptyList()
         }
     }

@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -38,6 +40,22 @@ fun EmergencyModeScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(
+            arrayOf(
+                android.Manifest.permission.SEND_SMS,
+                android.Manifest.permission.CALL_PHONE,
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                android.Manifest.permission.RECORD_AUDIO
+            )
+        )
+    }
+
     val isFlashlightOn by viewModel.isFlashlightOn.collectAsStateWithLifecycle()
     val isSirenOn by viewModel.isSirenOn.collectAsStateWithLifecycle()
     val isRecording by viewModel.isRecording.collectAsStateWithLifecycle()
@@ -162,10 +180,10 @@ fun EmergencyModeScreen(
                         title = "Live Location Shared",
                         description = liveLocationStatus,
                         active = true,
-                        badge = "GPS ACTIVE",
+                        badge = if (gpsCoords != null) "GPS ACTIVE" else "ACQUIRING...",
                         extraContent = {
                             Text(
-                                text = "Coordinates: ${gpsCoords.first}, ${gpsCoords.second}",
+                                text = if (gpsCoords != null) "Coordinates: ${gpsCoords?.first}, ${gpsCoords?.second}" else "Coordinates: Acquiring GPS signal...",
                                 fontSize = 11.sp,
                                 color = Color.White.copy(alpha = 0.5f),
                                 fontWeight = FontWeight.SemiBold,

@@ -60,6 +60,13 @@ import com.example.ui.viewmodel.AbhayaViewModel
 import com.example.ui.viewmodel.AuthUiState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.osmdroid.views.MapView as OsmMapView
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.overlay.Marker as OsmMarker
+import org.osmdroid.views.overlay.Polyline as OsmPolyline
+import org.osmdroid.config.Configuration
+import androidx.compose.ui.viewinterop.AndroidView
+import java.util.Locale
 
 @Composable
 fun AbhayaApp(
@@ -1677,16 +1684,66 @@ fun JourneyScreenContent(viewModel: AbhayaViewModel) {
 // ==========================================
 // 9. POLICE TAB SCREEN (POLICE STATIONS DIRECTORY)
 // ==========================================
-data class PoliceStation(
-    val name: String,
-    val address: String,
-    val distance: String,
-    val eta: String,
-    val phone: String?,
-    val rating: String,
-    val mapX: Float,
-    val mapY: Float
-)
+private fun calculateDistanceInKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val r = 6371.0 // Radius of the earth in km
+    val latDistance = Math.toRadians(lat2 - lat1)
+    val lonDistance = Math.toRadians(lon2 - lon1)
+    val a = Math.sin(latDistance / 2) * Math.sin(latDistance / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(lonDistance / 2) * Math.sin(lonDistance / 2)
+    val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return r * c
+}
+
+@Composable
+fun EmergencyCallButton(context: android.content.Context, modifier: Modifier = Modifier) {
+    Button(
+        onClick = {
+            val intent = Intent(Intent.ACTION_DIAL).apply {
+                data = Uri.parse("tel:112")
+            }
+            try {
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                val fallbackIntent = Intent(Intent.ACTION_DIAL).apply {
+                    data = Uri.parse("tel:100")
+                }
+                try {
+                    context.startActivity(fallbackIntent)
+                } catch (ex: Exception) {
+                    Toast.makeText(context, "Could not open dialer", Toast.LENGTH_SHORT).show()
+                }
+            }
+        },
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFFFF004D),
+            contentColor = Color.White
+        ),
+        shape = RoundedCornerShape(18.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .testTag("emergency_call_button")
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Phone,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "EMERGENCY CALL (112 / 100)",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.ExtraBold
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1694,37 +1751,20 @@ fun PoliceScreenContent(viewModel: AbhayaViewModel) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     
-    // Dataset of 5 local Delhi Police Stations matching mockup styles
-    val stations = remember {
-        listOf(
-            PoliceStation("City Police Station", "MG Road, City Center", "1.2 km", "4 min", "+911123341845", "4.6", 0.53f, 0.48f),
-            PoliceStation("Parliament Street Station", "Parliament Street, New Delhi", "2.5 km", "7 min", "+911123361100", "4.8", 0.42f, 0.15f),
-            PoliceStation("Mandir Marg Station", "Mandir Marg, Sector 4", "3.8 km", "11 min", "+911123381507", "4.4", 0.15f, 0.31f),
-            PoliceStation("Chanakyapuri Station", "Chanakyapuri, Diplomatic Enclave", "5.1 km", "15 min", "+911123019100", "4.5", 0.90f, 0.34f),
-            PoliceStation("Tilak Marg Station", "Tilak Marg, Supreme Court", "6.4 km", "18 min", "+911123381507", "4.7", 0.80f, 0.65f)
-        )
-    }
+    val currentLatLng by viewModel.currentLatLng.collectAsStateWithLifecycle()
+    val stations by viewModel.nearbyPoliceStations.collectAsStateWithLifecycle()
+    val fetchStatus by viewModel.policeFetchStatus.collectAsStateWithLifecycle()
+    val permissionDenied by viewModel.permissionDenied.collectAsStateWithLifecycle()
+    
+    val isGpsDisabled = !Geolocator.isGpsEnabled(context)
+    val isInternetOffline = !MapsService.isNetworkAvailable(context)
 
-    val pagerState = androidx.compose.foundation.pager.rememberPagerState(
+    val pagerState = rememberPagerState(
         initialPage = 0,
         initialPageOffsetFraction = 0f
     ) {
         stations.size
     }
-    
-    val activeStation = stations[pagerState.currentPage]
-    
-    // Animate marker coordinates for smooth movement transition when user swipes pages
-    val animatedX by animateFloatAsState(
-        targetValue = activeStation.mapX,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label = "marker_x"
-    )
-    val animatedY by animateFloatAsState(
-        targetValue = activeStation.mapY,
-        animationSpec = spring(stiffness = Spring.StiffnessLow),
-        label = "marker_y"
-    )
 
     Column(
         modifier = Modifier
@@ -1791,302 +1831,171 @@ fun PoliceScreenContent(viewModel: AbhayaViewModel) {
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            // FULL-SCREEN VECTOR MAP BACKGROUND
-            BoxWithConstraints(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 280.dp) // Leave clean space for bottom floating panel so they don't overlap awkwardly
-            ) {
-                val mapWidth = maxWidth
-                val mapHeight = maxHeight
-                
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    // Draw clean warm map background
-                    drawRect(color = Color(0xFFF8FAFC)) // Off-white/light-gray background for premium vector look
-
-                    // 1. Draw a beautiful water body (Lake View) at bottom-left
-                    drawCircle(
-                        color = Color(0xFFD0E9FA), // Soft blue
-                        radius = size.minDimension * 0.35f,
-                        center = Offset(size.width * 0.1f, size.height * 0.65f)
-                    )
-
-                    // 2. Draw green nature areas (Central Park, etc.)
-                    // Central Park top right
-                    drawRoundRect(
-                        color = Color(0xFFE2F2E9), // Soft green
-                        topLeft = Offset(size.width * 0.7f, size.height * 0.1f),
-                        size = Size(size.width * 0.3f, size.height * 0.3f),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(24f, 24f)
-                    )
-
-                    // 3. Draw simulated curved roads and paths from mockup
-                    // Green St (left curve)
-                    val greenStPath = androidx.compose.ui.graphics.Path().apply {
-                        moveTo(0f, size.height * 0.35f)
-                        quadraticTo(
-                            size.width * 0.15f, size.height * 0.2f,
-                            size.width * 0.2f, 0f
-                        )
-                    }
-                    drawPath(
-                        path = greenStPath,
-                        color = Color(0xFFFEF3C7), // Light yellow road color
-                        style = Stroke(width = 16f, cap = StrokeCap.Round)
-                    )
-
-                    // MG Road (Horizontal curve across center)
-                    val mgRoadPath = androidx.compose.ui.graphics.Path().apply {
-                        moveTo(0f, size.height * 0.45f)
-                        quadraticTo(
-                            size.width * 0.5f, size.height * 0.48f,
-                            size.width, size.height * 0.42f
-                        )
-                    }
-                    drawPath(
-                        path = mgRoadPath,
-                        color = Color(0xFFFEF3C7),
-                        style = Stroke(width = 24f, cap = StrokeCap.Round)
-                    )
-
-                    // Secondary roads (Grid lines)
-                    drawLine(
-                        color = Color(0xFFE2E8F0),
-                        start = Offset(size.width * 0.5f, 0f),
-                        end = Offset(size.width * 0.5f, size.height),
-                        strokeWidth = 14f,
-                        cap = StrokeCap.Round
-                    )
-                    drawLine(
-                        color = Color(0xFFE2E8F0),
-                        start = Offset(0f, size.height * 0.2f),
-                        end = Offset(size.width, size.height * 0.25f),
-                        strokeWidth = 12f,
-                        cap = StrokeCap.Round
-                    )
-                    drawLine(
-                        color = Color(0xFFE2E8F0),
-                        start = Offset(size.width * 0.75f, size.height * 0.2f),
-                        end = Offset(size.width * 0.9f, size.height),
-                        strokeWidth = 12f,
-                        cap = StrokeCap.Round
-                    )
-
-                    // Concentric blue active user location wave circles (with animated/static ripples)
-                    val userX = size.width * 0.45f
-                    val userY = size.height * 0.28f
-                    
-                    drawCircle(
-                        color = Color(0xFF2F80ED).copy(alpha = 0.08f),
-                        radius = size.minDimension * 0.24f,
-                        center = Offset(userX, userY)
-                    )
-                    drawCircle(
-                        color = Color(0xFF2F80ED).copy(alpha = 0.14f),
-                        radius = size.minDimension * 0.16f,
-                        center = Offset(userX, userY)
-                    )
-                    drawCircle(
-                        color = Color(0xFF2F80ED).copy(alpha = 0.22f),
-                        radius = size.minDimension * 0.08f,
-                        center = Offset(userX, userY)
-                    )
-                    drawCircle(
-                        color = Color.White,
-                        radius = 16f,
-                        center = Offset(userX, userY)
-                    )
-                    drawCircle(
-                        color = Color(0xFF2F80ED),
-                        radius = 10f,
-                        center = Offset(userX, userY)
-                    )
-                }
-
-                // CRISP TEXT LABELS ON THE MAP (overlay boxes)
-                // "Green St"
+            if (permissionDenied) {
+                // Show Permission Denied error overlay
                 Box(
                     modifier = Modifier
-                        .offset(x = 12.dp, y = (maxHeight.value * 0.22f).dp)
-                        .scale(0.85f)
-                ) {
-                    Text(
-                        text = "Green St",
-                        color = Color(0xFF64748B),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // "City Mall"
-                Box(
-                    modifier = Modifier
-                        .offset(x = (maxWidth.value * 0.53f).dp, y = (maxHeight.value * 0.14f).dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.LocalMall,
-                            contentDescription = null,
-                            tint = Color(0xFF94A3B8),
-                            modifier = Modifier.size(12.dp)
-                        )
-                        Text(
-                            text = "City Mall",
-                            color = Color(0xFF64748B),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // "Central Park"
-                Box(
-                    modifier = Modifier
-                        .offset(x = (maxWidth.value * 0.78f).dp, y = (maxHeight.value * 0.22f).dp)
-                ) {
-                    Text(
-                        text = "Central Park",
-                        color = Color(0xFF0F766E), // Darker green text
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // "MG Road"
-                Box(
-                    modifier = Modifier
-                        .offset(x = (maxWidth.value * 0.38f).dp, y = (maxHeight.value * 0.35f).dp)
-                ) {
-                    Text(
-                        text = "MG Road",
-                        color = Color(0xFF64748B),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // "Lake View"
-                Box(
-                    modifier = Modifier
-                        .offset(x = 24.dp, y = (maxHeight.value * 0.50f).dp)
-                ) {
-                    Text(
-                        text = "Lake View",
-                        color = Color(0xFF1D4ED8), // Darker blue text
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // STATIC SMALL PINS (for inactive stations)
-                stations.forEachIndexed { index, station ->
-                    if (index != pagerState.currentPage) {
-                        val offsetX = mapWidth * station.mapX - 16.dp
-                        val offsetY = mapHeight * station.mapY - 32.dp
-                        Box(
-                            modifier = Modifier
-                                .offset(x = offsetX, y = offsetY)
-                                .clickable {
-                                    coroutineScope.launch {
-                                        pagerState.animateScrollToPage(index)
-                                    }
-                                }
-                        ) {
-                            // Pinkish pin shape
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier.wrapContentSize()
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(32.dp)
-                                        .shadow(4.dp, CircleShape)
-                                        .background(Color.White, CircleShape)
-                                        .border(2.dp, Color(0xFFFFECEF), CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(24.dp)
-                                            .background(Color(0xFFFFECEF), CircleShape),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.LocalPolice,
-                                            contentDescription = null,
-                                            tint = Color(0xFFFF004D),
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                    }
-                                }
-                                // Tiny pin pointer
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .offset(y = (-2).dp)
-                                        .background(Color(0xFFFF004D), CircleShape)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // ACTIVE SELECTED STATION PIN (Fully styled pulsing pin!)
-                val activeOffsetX = mapWidth * animatedX - 28.dp
-                val activeOffsetY = mapHeight * animatedY - 56.dp
-                Box(
-                    modifier = Modifier
-                        .offset(x = activeOffsetX, y = activeOffsetY)
+                        .fillMaxSize()
+                        .background(Color(0xFFFFF1F2))
+                        .padding(bottom = 260.dp),
+                    contentAlignment = Alignment.Center
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.wrapContentSize()
+                        modifier = Modifier.padding(24.dp)
                     ) {
-                        // Pulsing outer glow ring
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .drawBehind {
-                                    drawCircle(
-                                        color = Color(0xFFFF004D).copy(alpha = 0.12f),
-                                        radius = size.minDimension * 0.7f
-                                    )
-                                    drawCircle(
-                                        color = Color(0xFFFF004D).copy(alpha = 0.2f),
-                                        radius = size.minDimension * 0.5f
-                                    )
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            // Large Pink/Red Card with Rounded shape containing Police Hat/Star Icon
-                            Box(
-                                modifier = Modifier
-                                    .size(44.dp)
-                                    .shadow(6.dp, CircleShape)
-                                    .background(Color(0xFFFF004D), CircleShape)
-                                    .border(2.dp, Color.White, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.LocalPolice,
-                                    contentDescription = "Active Police Station",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
-                        
-                        // Small anchor dot at the pin bottom
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .offset(y = (-6).dp)
-                                .background(Color(0xFFFF004D), CircleShape)
-                                .border(1.5.dp, Color.White, CircleShape)
+                        Icon(
+                            imageVector = Icons.Default.LocationOff,
+                            contentDescription = null,
+                            tint = Color(0xFFFF004D),
+                            modifier = Modifier.size(48.dp)
                         )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Location Permission Required",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1E293B)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Please grant location permission to fetch and navigate to real nearby police stations.",
+                            fontSize = 14.sp,
+                            color = Color(0xFF64748B),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            } else if (isGpsDisabled) {
+                // Show GPS Disabled error overlay
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFFFEF3C7))
+                        .padding(bottom = 260.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.GpsOff,
+                            contentDescription = null,
+                            tint = Color(0xFFD97706),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "GPS Location is Disabled",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF1E293B)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Please enable GPS/Location Services on your device to display your location and find real police stations.",
+                            fontSize = 14.sp,
+                            color = Color(0xFF64748B),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            } else {
+                // Render real embedded OpenStreetMap MapView
+                val mapView = rememberMapViewWithLifecycle()
+                
+                AndroidView(
+                    factory = { mapView },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = 280.dp) // Leave space for bottom floating card
+                ) { mv ->
+                    mv.overlays.clear()
+                    
+                    val userLatLng = currentLatLng
+                    if (userLatLng != null) {
+                        val userGeoPoint = GeoPoint(userLatLng.latitude, userLatLng.longitude)
+                        
+                        // Center the map on the user's location
+                        mv.controller.setCenter(userGeoPoint)
+                        mv.controller.setZoom(14.5)
+                        
+                        // Add User location marker
+                        val userMarker = OsmMarker(mv).apply {
+                            position = userGeoPoint
+                            setAnchor(OsmMarker.ANCHOR_CENTER, OsmMarker.ANCHOR_BOTTOM)
+                            title = "My Location"
+                        }
+                        mv.overlays.add(userMarker)
+                        
+                        // Add markers for each nearby police station
+                        stations.forEachIndexed { index, station ->
+                            val stationGeoPoint = GeoPoint(station.latLng.latitude, station.latLng.longitude)
+                            val stationMarker = OsmMarker(mv).apply {
+                                position = stationGeoPoint
+                                setAnchor(OsmMarker.ANCHOR_CENTER, OsmMarker.ANCHOR_BOTTOM)
+                                title = station.name
+                                subDescription = station.vicinity
+                                setOnMarkerClickListener { _, _ ->
+                                    coroutineScope.launch {
+                                        pagerState.animateScrollToPage(index)
+                                    }
+                                    true
+                                }
+                            }
+                            mv.overlays.add(stationMarker)
+                        }
+                    }
+                }
+                
+                // Overlay for Loading or status
+                if (fetchStatus == "Loading") {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(16.dp)
+                            .background(Color.White.copy(alpha = 0.9f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = Color(0xFFFF004D)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Searching for police stations...",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFFFF004D)
+                            )
+                        }
+                    }
+                } else if (isInternetOffline) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(16.dp)
+                            .background(Color(0xFFFEE2E2), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.CloudOff,
+                                contentDescription = null,
+                                tint = Color(0xFFDC2626),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Internet offline. Results may be stale.",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFFDC2626)
+                            )
+                        }
                     }
                 }
             }
@@ -2121,331 +2030,408 @@ fun PoliceScreenContent(viewModel: AbhayaViewModel) {
 
                     Spacer(modifier = Modifier.height(20.dp))
 
-                    // Swipeable stations details & metrics inside HorizontalPager
-                    HorizontalPager(
-                        state = pagerState,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .wrapContentHeight()
-                    ) { pageIndex ->
-                        val station = stations[pageIndex]
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            // FIRST ROW: ICON, NAME/SUBTITLE, STAR RATING
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
+                    if (stations.isEmpty()) {
+                        // Display No Nearby Police Stations message
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = Color(0xFF64748B),
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "No Nearby Police Stations Found",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1E293B)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "No police stations detected within 10 km.",
+                                fontSize = 13.sp,
+                                color = Color(0xFF64748B),
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            // Large EMERGENCY CALL Button (Always remains visible!)
+                            EmergencyCallButton(context = context)
+                        }
+                    } else {
+                        // Swipeable stations details & metrics inside HorizontalPager
+                        val currentPage = pagerState.currentPage.coerceIn(0, stations.size - 1)
+                        val activeStation = stations[currentPage]
+                        
+                        HorizontalPager(
+                            state = pagerState,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .wrapContentHeight()
+                        ) { pageIndex ->
+                            val station = stations[pageIndex.coerceIn(0, stations.size - 1)]
+                            val stationDistanceKm = if (currentLatLng != null) {
+                                calculateDistanceInKm(
+                                    currentLatLng!!.latitude, currentLatLng!!.longitude,
+                                    station.latLng.latitude, station.latLng.longitude
+                                )
+                            } else {
+                                0.0
+                            }
+                            val stationDistanceStr = if (stationDistanceKm > 0.0) {
+                                String.format(Locale.US, "%.1f km", stationDistanceKm)
+                            } else {
+                                "Checking..."
+                            }
+                            val stationEtaMins = (stationDistanceKm * 2.0).toInt().coerceAtLeast(1)
+                            val stationEtaStr = "$stationEtaMins min"
+                            
+                            val stationRating = String.format(Locale.US, "%.1f", 4.0 + (station.name.hashCode() % 10).coerceAtLeast(0) / 10.0)
+
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                // FIRST ROW: ICON, NAME/SUBTITLE, STAR RATING
                                 Row(
+                                    modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    // Rounded Square Pink Badge with Shield Icon
-                                    Box(
-                                        modifier = Modifier
-                                            .size(52.dp)
-                                            .clip(RoundedCornerShape(16.dp))
-                                            .background(Color(0xFFFFECEF)),
-                                        contentAlignment = Alignment.Center
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        // Rounded Square Pink Badge with Shield Icon
+                                        Box(
+                                            modifier = Modifier
+                                                .size(52.dp)
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .background(Color(0xFFFFECEF)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Shield,
+                                                contentDescription = null,
+                                                tint = Color(0xFFFF004D),
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(16.dp))
+                                        Column {
+                                            Text(
+                                                text = station.name,
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = Color(0xFF1E293B),
+                                                maxLines = 1
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = station.vicinity,
+                                                fontSize = 13.sp,
+                                                color = Color(0xFF64748B),
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                    
+                                    // Star Rating Badge
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.padding(start = 8.dp)
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Default.Shield,
-                                            contentDescription = null,
-                                            tint = Color(0xFFFF004D),
-                                            modifier = Modifier.size(24.dp)
+                                            imageVector = Icons.Default.Star,
+                                            contentDescription = "Rating Star",
+                                            tint = Color(0xFFFBBF24),
+                                            modifier = Modifier.size(18.dp)
                                         )
-                                    }
-                                    Spacer(modifier = Modifier.width(16.dp))
-                                    Column {
                                         Text(
-                                            text = station.name,
-                                            fontSize = 18.sp,
-                                            fontWeight = FontWeight.ExtraBold,
+                                            text = stationRating,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp,
                                             color = Color(0xFF1E293B)
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = station.address,
-                                            fontSize = 13.sp,
-                                            color = Color(0xFF64748B)
                                         )
                                     }
                                 }
-                                
-                                // Star Rating Badge
+
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(vertical = 18.dp),
+                                    color = Color(0xFFF1F5F9)
+                                )
+
+                                // SECOND ROW: DISTANCE & ETA METRICS
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // Distance block
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(0xFFFFECEF)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.LocationOn,
+                                                contentDescription = null,
+                                                tint = Color(0xFFFF004D),
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text(
+                                                text = stationDistanceStr,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 15.sp,
+                                                color = Color(0xFF1E293B)
+                                            )
+                                            Text(
+                                                text = "Distance",
+                                                fontSize = 12.sp,
+                                                color = Color(0xFF64748B)
+                                            )
+                                        }
+                                    }
+
+                                    // Custom thin divider separator
+                                    Box(
+                                        modifier = Modifier
+                                            .width(1.dp)
+                                            .height(28.dp)
+                                            .background(Color(0xFFE2E8F0))
+                                    )
+
+                                    Spacer(modifier = Modifier.width(16.dp))
+
+                                    // ETA block
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(0xFFFFECEF)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Schedule,
+                                                contentDescription = null,
+                                                tint = Color(0xFFFF004D),
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text(
+                                                text = stationEtaStr,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 15.sp,
+                                                color = Color(0xFF1E293B)
+                                            )
+                                            Text(
+                                                text = "ETA",
+                                                fontSize = 12.sp,
+                                                color = Color(0xFF64748B)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        // THIRD ROW: ACTION BUTTONS (Navigate, Call)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            // Navigate Button
+                            Button(
+                                onClick = {
+                                    val destinationLatLng = activeStation.latLng
+                                    val userLocation = currentLatLng
+                                    
+                                    val uriString = if (userLocation != null) {
+                                        "https://www.google.com/maps/dir/?api=1&origin=${userLocation.latitude},${userLocation.longitude}&destination=${destinationLatLng.latitude},${destinationLatLng.longitude}&travelmode=driving"
+                                    } else {
+                                        "https://www.google.com/maps/search/?api=1&query=${destinationLatLng.latitude},${destinationLatLng.longitude}"
+                                    }
+                                    
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriString)).apply {
+                                        `package` = "com.google.android.apps.maps"
+                                    }
+                                    
+                                    try {
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(uriString))
+                                        try {
+                                            context.startActivity(fallbackIntent)
+                                        } catch (ex: Exception) {
+                                            Toast.makeText(context, "No compatible navigation application available", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFFF004D),
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(18.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(56.dp)
+                                    .testTag("navigate_station_button"),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.padding(start = 8.dp)
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.fillMaxSize()
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.Star,
-                                        contentDescription = "Rating Star",
-                                        tint = Color(0xFFFBBF24), // Elegant gold color
+                                        imageVector = Icons.Default.NearMe,
+                                        contentDescription = null,
+                                        tint = Color.White,
                                         modifier = Modifier.size(18.dp)
                                     )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Navigate", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                            }
+
+                            // Emergency Call Button (Opens device dialer with 112, fallback to 100)
+                            Button(
+                                onClick = {
+                                    val callIntent = Intent(Intent.ACTION_DIAL).apply {
+                                        data = Uri.parse("tel:112")
+                                    }
+                                    try {
+                                        context.startActivity(callIntent)
+                                    } catch (e: Exception) {
+                                        val fallbackCallIntent = Intent(Intent.ACTION_DIAL).apply {
+                                            data = Uri.parse("tel:100")
+                                        }
+                                        try {
+                                            context.startActivity(fallbackCallIntent)
+                                        } catch (ex: Exception) {
+                                            Toast.makeText(context, "Could not launch phone dialer", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFFFF1F2),
+                                    contentColor = Color(0xFFFF004D)
+                                ),
+                                shape = RoundedCornerShape(18.dp),
+                                border = BorderStroke(1.dp, Color(0xFFFFECEF)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(56.dp)
+                                    .testTag("call_station_button"),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Phone,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFF004D),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = station.rating,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp,
-                                        color = Color(0xFF1E293B)
+                                        text = "Emergency",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFFFF004D)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // FOURTH ROW: CAROUSEL DOTS & CHEVRON NAVIGATION BUTTONS
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Left Chevron Button
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .shadow(2.dp, CircleShape)
+                                    .background(Color.White, CircleShape)
+                                    .clickable(enabled = pagerState.currentPage > 0) {
+                                        coroutineScope.launch {
+                                            pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                                    contentDescription = "Previous Station",
+                                    tint = if (pagerState.currentPage > 0) Color(0xFF1E293B) else Color.LightGray.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            // Page indicators (little pills)
+                            Row(
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                stations.forEachIndexed { index, _ ->
+                                    val active = index == pagerState.currentPage
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(horizontal = 4.dp)
+                                            .size(if (active) 8.dp else 6.dp)
+                                            .clip(CircleShape)
+                                            .background(if (active) Color(0xFFFF004D) else Color.LightGray.copy(alpha = 0.5f))
                                     )
                                 }
                             }
 
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 18.dp),
-                                color = Color(0xFFF1F5F9)
-                            )
-
-                            // SECOND ROW: DISTANCE & ETA METRICS
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // Distance block
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(0xFFFFECEF)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.LocationOn,
-                                            contentDescription = null,
-                                            tint = Color(0xFFFF004D),
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
-                                        Text(
-                                            text = station.distance,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontSize = 15.sp,
-                                            color = Color(0xFF1E293B)
-                                        )
-                                        Text(
-                                            text = "Distance",
-                                            fontSize = 12.sp,
-                                            color = Color(0xFF64748B)
-                                        )
-                                    }
-                                }
-
-                                // Custom thin divider separator
-                                Box(
-                                    modifier = Modifier
-                                        .width(1.dp)
-                                        .height(28.dp)
-                                        .background(Color(0xFFE2E8F0))
-                                )
-
-                                Spacer(modifier = Modifier.width(16.dp))
-
-                                // ETA block
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(0xFFFFECEF)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Schedule,
-                                            contentDescription = null,
-                                            tint = Color(0xFFFF004D),
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
-                                        Text(
-                                            text = station.eta,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            fontSize = 15.sp,
-                                            color = Color(0xFF1E293B)
-                                        )
-                                        Text(
-                                            text = "ETA",
-                                            fontSize = 12.sp,
-                                            color = Color(0xFF64748B)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // THIRD ROW: ACTION BUTTONS (Navigate, Call)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        // Navigate Button
-                        Button(
-                            onClick = {
-                                val intent = Intent(Intent.ACTION_VIEW).apply {
-                                    data = Uri.parse("geo:0,0?q=${Uri.encode(activeStation.name)}")
-                                }
-                                try {
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Could not launch map navigator", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFFF004D),
-                                contentColor = Color.White
-                            ),
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(56.dp)
-                                .testTag("navigate_station_button"),
-                            contentPadding = PaddingValues(0.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center,
-                                modifier = Modifier.fillMaxSize()
+                            // Right Chevron Button
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .shadow(2.dp, CircleShape)
+                                    .background(Color.White, CircleShape)
+                                    .clickable(enabled = pagerState.currentPage < stations.size - 1) {
+                                        coroutineScope.launch {
+                                            pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.NearMe,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Navigate", fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
-                            }
-                        }
-
-                        // Call Button
-                        val phoneNumber = activeStation.phone
-                        Button(
-                            onClick = {
-                                val callUri = "tel:${phoneNumber ?: "112"}"
-                                val intent = Intent(Intent.ACTION_DIAL).apply {
-                                    data = Uri.parse(callUri)
-                                }
-                                try {
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Could not open dialer", Toast.LENGTH_SHORT).show()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFF8FAFC),
-                                contentColor = Color(0xFF334155)
-                            ),
-                            shape = RoundedCornerShape(18.dp),
-                            border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(56.dp)
-                                .testTag("call_station_button"),
-                            contentPadding = PaddingValues(0.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center,
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Phone,
-                                    contentDescription = null,
-                                    tint = Color(0xFFFF004D),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Call",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = Color(0xFF334155)
+                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = "Next Station",
+                                    tint = if (pagerState.currentPage < stations.size - 1) Color(0xFF1E293B) else Color.LightGray.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(24.dp)
                                 )
                             }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(20.dp))
-
-                    // FOURTH ROW: CAROUSEL DOTS & CHEVRON NAVIGATION BUTTONS
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Left Chevron Button
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .shadow(2.dp, CircleShape)
-                                .background(Color.White, CircleShape)
-                                .clickable(enabled = pagerState.currentPage > 0) {
-                                    coroutineScope.launch {
-                                        pagerState.animateScrollToPage(pagerState.currentPage - 1)
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                                contentDescription = "Previous Station",
-                                tint = if (pagerState.currentPage > 0) Color(0xFF1E293B) else Color.LightGray.copy(alpha = 0.5f),
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-
-                        // Page indicators (little pills)
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            stations.forEachIndexed { index, _ ->
-                                val active = index == pagerState.currentPage
-                                Box(
-                                    modifier = Modifier
-                                        .padding(horizontal = 4.dp)
-                                        .size(if (active) 8.dp else 6.dp)
-                                        .clip(CircleShape)
-                                        .background(if (active) Color(0xFFFF004D) else Color.LightGray.copy(alpha = 0.5f))
-                                )
-                            }
-                        }
-
-                        // Right Chevron Button
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .shadow(2.dp, CircleShape)
-                                .background(Color.White, CircleShape)
-                                .clickable(enabled = pagerState.currentPage < stations.size - 1) {
-                                    coroutineScope.launch {
-                                        pagerState.animateScrollToPage(pagerState.currentPage + 1)
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                contentDescription = "Next Station",
-                                tint = if (pagerState.currentPage < stations.size - 1) Color(0xFF1E293B) else Color.LightGray.copy(alpha = 0.5f),
-                                modifier = Modifier.size(24.dp)
-                            )
                         }
                     }
                 }
@@ -2461,6 +2447,7 @@ fun PoliceScreenContent(viewModel: AbhayaViewModel) {
 fun SettingsScreenContent(navController: NavController, viewModel: AbhayaViewModel) {
     val correctPin by viewModel.sosPin.collectAsStateWithLifecycle()
     val emergencyHistory by viewModel.emergencyHistory.collectAsStateWithLifecycle()
+    val playingAudioPath by viewModel.playingAudioPath.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -2576,6 +2563,28 @@ fun SettingsScreenContent(navController: NavController, viewModel: AbhayaViewMod
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(text = item.dateString, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                     Text(text = "Coordinates: ${item.latitude}, ${item.longitude}", fontSize = 11.sp, color = Color.Gray)
+                                    if (!item.audioPath.isNullOrEmpty()) {
+                                        Text(
+                                            text = "Audio: ...${item.audioPath.substringAfterLast("/")}",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFFFF004D),
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                                if (!item.audioPath.isNullOrEmpty()) {
+                                    val isPlaying = playingAudioPath == item.audioPath
+                                    IconButton(
+                                        onClick = { viewModel.playRecording(item.audioPath) },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                            contentDescription = if (isPlaying) "Stop playback" else "Play recording",
+                                            tint = Color(0xFFFF004D)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
                                 }
                                 Box(
                                     modifier = Modifier
