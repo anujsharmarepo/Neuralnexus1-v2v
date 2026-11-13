@@ -3,49 +3,35 @@ DOWNLOAD ABHAYA --
 https://drive.google.com/file/d/1R6S3APWD6YN3KagzT8NlzdkQN2c1qeH2/view?usp=drivesdk
 
 
-                                   🛡️ ABHAYA
-                     AI Powered Women Safety Platform
+                          
+### AI-Powered Women Safety Platform
 
-                                        │
-        ┌───────────────────────────────┼───────────────────────────────┐
-        │                               │                               │
-        ▼                               ▼                               ▼
-   🚨 Smart SOS                  🧭 Safe Journey              👮 Police Assistance
-        │                               │                               │
-        ├── 📍 Live GPS                 ├── 🔍 Destination Search       ├── 📍 Nearby Police
-        ├── 📲 SMS Alert                ├── 🗺️ Route Tracking           ├── 🚔 Station Details
-        ├── 📞 Call Guardian            ├── ⏱️ ETA                      ├── 📞 Call Station
-        ├── 💬 WhatsApp                 ├── 📡 Live Journey             ├── 🧭 Google Navigation
-        ├── 🎙️ Audio Record             ├── 👨‍👩‍👧 Guardian Tracking      └── 📏 Distance
-        ├── 🚨 Siren                    ├── 📍 Journey Progress
-        ├── 🔦 Flashlight               └── 🚨 Auto SOS
-        └── ☁️ Firebase
+ABHAYA is a women safety platform we're building to make everyday travel and emergency assistance easier and more accessible.
 
-                                        │
-                        ┌───────────────┴───────────────┐
-                        │                               │
-                        ▼                               ▼
-                🏥 Safe Places                👨‍👩‍👧 Guardian System
-                        │                               │
-          ├── 🚔 Police Station             ├── Add Guardian
-          ├── 🏥 Hospitals                  ├── Primary Guardian
-          ├── 💊 Pharmacy                   ├── Emergency Contacts
-          ├── ⛽ Petrol Pump                └── Live Tracking
-          └── 🆘 Help Center
+The idea is simple: bring important safety features together in one place, so users can quickly access help, stay connected with trusted contacts, and feel more informed during their journeys.
 
-                                        │
-                                        ▼
-                            ☁️ Firebase Backend
-                                        │
-          ┌──────────────┬──────────────┬──────────────┬──────────────┐
-          ▼              ▼              ▼              ▼
-     🔐 Auth       📂 Firestore    ☁️ Storage     📍 Live Location
-          │              │              │              │
-          └──────────────┴──────────────┴──────────────┘
-                               │
-                               ▼
-                    📜 Emergency History
-                    📜 Journey History
-                    📜 Guardian Status
-                    📜 Audio Recordings
-```
+## What We're Building
+
+- **Smart SOS:** Quick emergency alerts with live location sharing and guardian notifications.
+- **Safe Journey:** Track journeys, share travel progress and keep trusted contacts updated.
+- **Police Assistance:** Find nearby police stations and access their contact details.
+- **Safe Places:** Locate nearby hospitals, pharmacies, petrol pumps and other essential services.
+- **Guardian System:** Add emergency contacts and share journey information with them.
+
+## Tech Stack
+
+- Kotlin
+- Android Studio
+- Firebase
+- Google Maps API
+- Gemini API
+
+## Project Status
+
+Currently under development. We're working on building the core features, improving the user experience and integrating the required services.
+
+## Our Goal
+
+We want to use technology to make personal safety tools easier to access and more practical in everyday situations.
+
+**ABHAYA — Safety Through Technology.**
