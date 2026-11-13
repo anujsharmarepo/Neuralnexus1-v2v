@@ -16,3 +16,19 @@
 local.properties
 .env
 debug.keystore
+# Environment secrets
+.env.*
+!.env.example
+
+# Android build outputs
+**/build/
+
+# IDE files
+.idea/
+
+# Logs
+*.log
+
+# Keystore backups
+*.jks
+*.keystore
